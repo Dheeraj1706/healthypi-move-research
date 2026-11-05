@@ -1,0 +1,1176 @@
+--- a/app/VERSION
++++ b/app/VERSION
+@@ -1,5 +1,5 @@
+ VERSION_MAJOR = 3
+ VERSION_MINOR = 1
+-PATCHLEVEL = 0
++PATCHLEVEL = 1
+ VERSION_TWEAK = 0
+-EXTRAVERSION =
++EXTRAVERSION = ppg
+--- a/app/src/ble_module.c
++++ b/app/src/ble_module.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move
+  * 
+@@ -385,6 +386,7 @@
+ 	}
+ 
+ 	s_last_hr = m->hr;
++    hpi_research_scalar(HPR_HR, m->hr);
+ 
+ 	if (ble_notify_allowed())
+ 	{
+@@ -408,6 +410,7 @@
+ 		return;
+ 	}
+ 
++    hpi_research_scalar(HPR_BATTERY, level);
+ 	bt_bas_set_battery_level(level);
+ }
+ ZBUS_LISTENER_DEFINE(ble_batt_lis, ble_batt_listener);
+@@ -428,6 +431,8 @@
+ 	{
+ 		return;
+ 	}
++
++    hpi_research_scalar(HPR_SPO2, m->spo2);
+ 
+ 	/* Flags: bit0 = timestamp present, bit4 = device clock is not set. */
+ 	buf[i++] = (ts_present ? BIT(0) : 0) | (clock_set ? 0 : BIT(4));
+@@ -510,6 +515,7 @@
+ 	/* Flags byte 0: Celsius, no timestamp, no temperature type. Value is an
+ 	 * IEEE-11073 32-bit FLOAT — 24-bit signed mantissa (LE) + int8 exponent. */
+ 	mantissa = (int32_t)(m->temp_c * 100.0);
++    hpi_research_scalar(HPR_TEMP, mantissa);
+ 	s_temp_ind_buf[0] = 0;
+ 	s_temp_ind_buf[1] = (uint8_t)(mantissa & 0xFF);
+ 	s_temp_ind_buf[2] = (uint8_t)((mantissa >> 8) & 0xFF);
+--- a/app/src/data_module.c
++++ b/app/src/data_module.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move
+  *
+@@ -573,6 +574,7 @@
+                  * dropped ECG batches and the app's live plot went patchy.
+                  * The BioZ characteristic has its own correct feed from
+                  * q_bioz_sample below. */
++                hpi_research_send(HPR_ECG, &ecg_sensor_sample.research_stamp, ecg_sensor_sample.ecg_samples, ecg_sensor_sample.ecg_num_samples);
+                 ble_ecg_notify(ecg_sensor_sample.ecg_samples, ecg_sensor_sample.ecg_num_samples);
+             }
+             if (settings_plot_enabled)
+@@ -675,6 +677,7 @@
+             processed_data = true;
+             if (settings_send_ble_enabled)
+             {
++                hpi_research_send(HPR_GSR, &bsample.research_stamp, bsample.bioz_samples, bsample.bioz_num_samples);
+                 ble_gsr_notify(bsample.bioz_samples, bsample.bioz_num_samples);
+             }
+             if (settings_plot_enabled)
+@@ -764,6 +767,8 @@
+             processed_data = true;
+             if (settings_send_ble_enabled)
+             {
++                hpi_research_send(HPR_FINGER, &ppg_fi_sensor_sample.research_stamp, ppg_fi_sensor_sample.raw_ir, ppg_fi_sensor_sample.ppg_num_samples);
++                hpi_research_send(HPR_FINGER_RED, &ppg_fi_sensor_sample.research_stamp, ppg_fi_sensor_sample.raw_red, ppg_fi_sensor_sample.ppg_num_samples);
+                 ble_ppg_notify_fi(ppg_fi_sensor_sample.raw_ir, ppg_fi_sensor_sample.ppg_num_samples);
+             }
+             if (settings_plot_enabled)
+@@ -795,6 +800,9 @@
+             processed_data = true;
+             if (settings_send_ble_enabled)
+             {
++                hpi_research_send(HPR_WRIST, &ppg_wr_sensor_sample.research_stamp, ppg_wr_sensor_sample.raw_green, ppg_wr_sensor_sample.ppg_num_samples);
++                hpi_research_send(HPR_WRIST_RED, &ppg_wr_sensor_sample.research_stamp, ppg_wr_sensor_sample.raw_red, ppg_wr_sensor_sample.ppg_num_samples);
++                hpi_research_send(HPR_WRIST_IR, &ppg_wr_sensor_sample.research_stamp, ppg_wr_sensor_sample.raw_ir, ppg_wr_sensor_sample.ppg_num_samples);
+                 ble_ppg_notify_wr(ppg_wr_sensor_sample.raw_green, ppg_wr_sensor_sample.ppg_num_samples);
+             }
+             if (settings_plot_enabled)
+--- a/app/src/hpi_common_types.h
++++ b/app/src/hpi_common_types.h
+@@ -35,6 +35,7 @@
+ #pragma once
+ 
+ #include <time.h>
++#include "hpi_research_wire.h"
+ 
+ #define ECG_POINTS_PER_SAMPLE 16
+ #define BIOZ_POINTS_PER_SAMPLE 8
+@@ -55,6 +56,7 @@
+ 
+ struct hpi_ecg_bioz_sensor_data_t
+ {
++    struct hpr_stamp research_stamp; /* producer metadata; not legacy wire format */
+     int32_t ecg_samples[ECG_POINTS_PER_SAMPLE];
+     int32_t bioz_sample[BIOZ_POINTS_PER_SAMPLE];
+ 
+@@ -86,6 +88,7 @@
+  */
+ struct hpi_bioz_sample_t
+ {
++    struct hpr_stamp research_stamp; /* producer metadata; not legacy wire format */
+     int32_t bioz_samples[BIOZ_POINTS_PER_SAMPLE];  // Conductance in µS × 100 (fixed-point from driver)
+     uint8_t bioz_num_samples;
+     uint8_t bioz_lead_off;
+@@ -94,6 +97,7 @@
+ 
+ struct hpi_ppg_wr_data_t
+ {
++    struct hpr_stamp research_stamp; /* producer metadata; not legacy wire format */
+     uint32_t raw_red[PPG_POINTS_PER_SAMPLE];
+     uint32_t raw_ir[PPG_POINTS_PER_SAMPLE];
+     uint32_t raw_green[PPG_POINTS_PER_SAMPLE];
+@@ -123,6 +127,7 @@
+ 
+ struct hpi_ppg_fi_data_t
+ {
++    struct hpr_stamp research_stamp; /* producer metadata; not legacy wire format */
+     uint32_t raw_red[BPT_PPG_POINTS_PER_SAMPLE];
+     uint32_t raw_ir[BPT_PPG_POINTS_PER_SAMPLE];
+ 
+--- /dev/null
++++ b/app/src/hpi_research.c
+@@ -0,0 +1,293 @@
++/* SPDX-License-Identifier: MIT
++ * Opt-in research service; legacy GATT payloads remain unchanged.
++ */
++#include <zephyr/kernel.h>
++#include <zephyr/init.h>
++#include <zephyr/random/random.h>
++#include <zephyr/bluetooth/conn.h>
++#include <zephyr/bluetooth/gatt.h>
++#include <zephyr/sys/atomic.h>
++#include <errno.h>
++#include <string.h>
++#include "hpi_research.h"
++#include "hpi_evt.h"
++#include "hpi_dfu.h"
++
++#define UUID_RESEARCH(n) BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0xa17e0000 + (n), \
++    0x4d52, 0x4f56, 0x9100, 0x524553454152))
++
++enum { CMD_START = 1, CMD_STOP = 2, CMD_STATUS = 3 };
++enum { R_ACCEPTED, R_BUSY, R_INVALID, R_NOT_OWNER, R_UNSUPPORTED, R_DFU };
++static atomic_t states[5];
++static atomic_t indices[HPR_LAST_SIGNAL + 1];
++static atomic_t remote_target;
++static atomic_t terminal_target;
++static atomic_t stop_target;
++static atomic_t finger_busy;
++static atomic_t tx_failures;
++static uint32_t boot_id;
++static struct k_spinlock status_lock;
++static uint8_t status_bytes[HPR_STATUS_SIZE];
++/* Only the control thread dereferences/changes owner. */
++static struct bt_conn *owner;
++static int64_t pending_since;
++struct request { struct bt_conn *conn; uint8_t bytes[4]; };
++K_MSGQ_DEFINE(hpr_commands, sizeof(struct request), 4, sizeof(void *));
++struct scalar_packet { struct hpr_stamp stamp; int32_t value; uint8_t signal; };
++K_MSGQ_DEFINE(hpr_scalars, sizeof(struct scalar_packet), 8, 4);
++
++static bool active(uint8_t state)
++{
++    return state == HPR_STARTING || state == HPR_WAITING ||
++           state == HPR_MEASURING || state == HPR_STOPPING;
++}
++
++void hpi_research_state(uint8_t target, uint8_t state)
++{
++    if (target < 1 || target > 4) { return; }
++    uint8_t old = (uint8_t)atomic_get(&states[target]);
++    if (state == HPR_IDLE && old >= HPR_COMPLETE && old <= HPR_ERROR) { return; }
++    if (state == HPR_IDLE && active(old)) {
++        state = atomic_get(&stop_target) == target ? HPR_CANCELLED : HPR_ERROR;
++    }
++    atomic_set(&states[target], state);
++    if (!active(state) && atomic_cas(&remote_target, target, 0)) {
++        atomic_set(&terminal_target, target);
++        atomic_set(&stop_target, 0);
++    }
++}
++
++bool hpi_research_remote_owned(uint8_t target)
++{
++    return atomic_get(&remote_target) == target && active((uint8_t)atomic_get(&states[target]));
++}
++
++bool hpi_research_local_allowed(uint8_t target)
++{
++    ARG_UNUSED(target);
++    uint8_t owned = (uint8_t)atomic_get(&remote_target);
++    return owned == 0 || !active((uint8_t)atomic_get(&states[owned]));
++}
++
++void hpi_research_finger_busy(bool busy) { atomic_set(&finger_busy, busy); }
++
++void hpi_research_stamp(uint8_t signal, struct hpr_stamp *stamp, uint8_t count)
++{
++    if (signal < 1 || signal > HPR_LAST_SIGNAL || !stamp || !count) { return; }
++    uint16_t rate = hpr_rate_hz(signal);
++    stamp->first_index = (uint32_t)atomic_add(&indices[signal], count);
++    /* Time of FIFO read/producer callback minus nominal batch span. NOT a
++     * hardware timestamp; FIFO dwell, scheduling and sensor delays are unknown. */
++    stamp->first_ms = k_uptime_get_32() - (rate ?
++        ((uint32_t)(count - 1) * 1000 / rate) : 0);
++}
++
++void hpi_research_scalar(uint8_t signal, int32_t value)
++{
++    if (signal < HPR_HR || signal > HPR_BATTERY) { return; }
++    struct scalar_packet packet = {.signal = signal, .value = value};
++    hpi_research_stamp(signal, &packet.stamp, 1);
++    if (k_msgq_put(&hpr_scalars, &packet, K_NO_WAIT)) { atomic_inc(&tx_failures); }
++}
++
++static ssize_t read_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
++                            void *buf, uint16_t len, uint16_t offset)
++{
++    uint8_t snapshot[HPR_STATUS_SIZE];
++    k_spinlock_key_t key = k_spin_lock(&status_lock);
++    memcpy(snapshot, status_bytes, sizeof(snapshot));
++    k_spin_unlock(&status_lock, key);
++    return bt_gatt_attr_read(conn, attr, buf, len, offset, snapshot, sizeof(snapshot));
++}
++
++static ssize_t write_control(struct bt_conn *conn, const struct bt_gatt_attr *attr,
++                              const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
++{
++    ARG_UNUSED(attr);
++    if (offset || (flags & (BT_GATT_WRITE_FLAG_PREPARE | BT_GATT_WRITE_FLAG_CMD))) {
++        return BT_GATT_ERR(BT_ATT_ERR_NOT_SUPPORTED);
++    }
++    if (len != 4) { return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN); }
++    const uint8_t *b = buf;
++    if (b[0] != HPR_VERSION || b[1] < CMD_START || b[1] > CMD_STATUS ||
++        b[2] > 4 || b[3] == 0 || (b[1] != CMD_STATUS && b[2] == 0)) {
++        return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
++    }
++    struct request req = {.conn = bt_conn_ref(conn)};
++    memcpy(req.bytes, b, sizeof(req.bytes));
++    if (k_msgq_put(&hpr_commands, &req, K_NO_WAIT)) {
++        bt_conn_unref(req.conn);
++        return BT_GATT_ERR(BT_ATT_ERR_INSUFFICIENT_RESOURCES);
++    }
++    return len; /* ATT write success means queued, not acquisition success. */
++}
++
++BT_GATT_SERVICE_DEFINE(hpr_service,
++    BT_GATT_PRIMARY_SERVICE(UUID_RESEARCH(0)),
++    BT_GATT_CHARACTERISTIC(UUID_RESEARCH(1), BT_GATT_CHRC_WRITE,
++                           BT_GATT_PERM_WRITE_ENCRYPT, NULL, write_control, NULL),
++    BT_GATT_CHARACTERISTIC(UUID_RESEARCH(2), BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
++                           BT_GATT_PERM_READ_ENCRYPT, read_status, NULL, NULL),
++    BT_GATT_CCC(NULL, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
++    BT_GATT_CHARACTERISTIC(UUID_RESEARCH(3), BT_GATT_CHRC_NOTIFY,
++                           BT_GATT_PERM_NONE, NULL, NULL, NULL),
++    BT_GATT_CCC(NULL, BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT)
++);
++
++static void publish_status(struct bt_conn *conn, uint8_t request_id,
++                            uint8_t opcode, uint8_t target, uint8_t result)
++{
++    uint8_t b[HPR_STATUS_SIZE] = {HPR_VERSION, request_id, opcode, target, result};
++    b[5] = target ? (uint8_t)atomic_get(&states[target]) : HPR_IDLE;
++    for (uint8_t i = 1; i <= 4; ++i) {
++        if (active((uint8_t)atomic_get(&states[i]))) { b[6] |= BIT(i - 1); }
++    }
++    b[7] = HPR_FLAG_TIME_ESTIMATED;
++    hpr_put32(b + 8, boot_id);
++    hpr_put32(b + 12, k_uptime_get_32());
++    hpr_put32(b + 16, (uint32_t)atomic_get(&tx_failures));
++    k_spinlock_key_t key = k_spin_lock(&status_lock);
++    memcpy(status_bytes, b, sizeof(b));
++    k_spin_unlock(&status_lock, key);
++    if (conn && bt_conn_get_security(conn) >= BT_SECURITY_L2 &&
++        bt_gatt_is_subscribed(conn, &hpr_service.attrs[4], BT_GATT_CCC_NOTIFY)) {
++        (void)bt_gatt_notify(conn, &hpr_service.attrs[4], b, sizeof(b));
++    }
++}
++
++static void post_request(uint8_t target, bool start)
++{
++    switch (target) {
++    case HPR_ECG: k_event_post(&ecg_evt, start ? EVT_ECG_START : EVT_ECG_CANCEL); break;
++    case HPR_GSR: k_event_post(&ecg_evt, start ? EVT_GSR_START : EVT_GSR_CANCEL); break;
++    case HPR_WRIST: k_event_post(&spo2_evt, start ? EVT_SPO2_START : EVT_SPO2_CANCEL); break;
++    case HPR_FINGER: k_event_post(&fi_evt, start ? EVT_FI_SPO2_START : EVT_FI_SPO2_CANCEL); break;
++    }
++}
++
++static void process(struct request *req)
++{
++    uint8_t opcode = req->bytes[1], target = req->bytes[2], result = R_ACCEPTED;
++    struct bt_conn_info info;
++    if (bt_conn_get_info(req->conn, &info) || info.state != BT_CONN_STATE_CONNECTED ||
++        bt_conn_get_security(req->conn) < BT_SECURITY_L2) { return; }
++    if (hpi_dfu_is_active()) { result = R_DFU; }
++    else if (opcode == CMD_START) {
++        bool busy = atomic_get(&finger_busy) != 0;
++        for (uint8_t i = 1; i <= 4; ++i) { busy |= active((uint8_t)atomic_get(&states[i])); }
++        if (owner == req->conn && hpi_research_remote_owned(target)) {
++            /* Idempotent start: do not reset/restart an active measurement. */
++        } else if (busy) { result = R_BUSY; }
++        else {
++            if (owner) { bt_conn_unref(owner); }
++            owner = bt_conn_ref(req->conn);
++            atomic_set(&remote_target, target);
++            atomic_set(&stop_target, 0);
++            atomic_set(&states[target], HPR_STARTING);
++            pending_since = k_uptime_get();
++            post_request(target, true);
++        }
++    } else if (opcode == CMD_STOP) {
++        if (owner != req->conn || atomic_get(&remote_target) != target) { result = R_NOT_OWNER; }
++        else if (active((uint8_t)atomic_get(&states[target]))) {
++            atomic_set(&stop_target, target);
++            atomic_set(&states[target], HPR_STOPPING);
++            pending_since = k_uptime_get();
++            post_request(target, false);
++        }
++    }
++    publish_status(req->conn, req->bytes[3], opcode, target, result);
++}
++
++static void control_thread(void *a, void *b, void *c)
++{
++    ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
++    struct request req;
++    while (1) {
++        if (!k_msgq_get(&hpr_commands, &req, K_MSEC(200))) {
++            process(&req);
++            bt_conn_unref(req.conn);
++        }
++        struct scalar_packet scalar;
++        while (!k_msgq_get(&hpr_scalars, &scalar, K_NO_WAIT)) {
++            hpi_research_send(scalar.signal, &scalar.stamp, &scalar.value, 1);
++        }
++        uint8_t target = (uint8_t)atomic_get(&remote_target);
++        if (!target) {
++            if (owner) {
++                publish_status(owner, 0, 0, (uint8_t)atomic_get(&terminal_target), R_ACCEPTED);
++                bt_conn_unref(owner); owner = NULL;
++            }
++            continue;
++        }
++        uint8_t state = (uint8_t)atomic_get(&states[target]);
++        /* Keep cancellation latched across the sensor controller's startup
++         * sleeps / stale-event clearing. One early Cancel can otherwise vanish. */
++        if (atomic_get(&stop_target) == target && active(state)) {
++            post_request(target, false);
++        }
++        if ((state == HPR_STARTING || state == HPR_STOPPING) &&
++            k_uptime_get() - pending_since > 5000) {
++            post_request(target, false);
++            hpi_research_state(target, HPR_ERROR);
++        }
++        if (owner) {
++            struct bt_conn_info info;
++            if (bt_conn_get_info(owner, &info) || info.state != BT_CONN_STATE_CONNECTED) {
++                /* Fail-safe cancellation, not automatic restart after reconnect. */
++                if (active((uint8_t)atomic_get(&states[target]))) {
++                    atomic_set(&stop_target, target);
++                    atomic_set(&states[target], HPR_STOPPING);
++                    pending_since = k_uptime_get();
++                    post_request(target, false);
++                }
++                bt_conn_unref(owner); owner = NULL;
++            } else {
++                publish_status(owner, 0, 0, target, R_ACCEPTED); /* unsolicited status */
++            }
++        }
++    }
++}
++K_THREAD_DEFINE(hpr_control_thread, 1536, control_thread, NULL, NULL, NULL, 8, 0, 0);
++
++struct send_context { uint8_t signal, count; const void *samples; const struct hpr_stamp *stamp; };
++static void send_to(struct bt_conn *conn, void *user_data)
++{
++    const struct send_context *ctx = user_data;
++    if (bt_conn_get_security(conn) < BT_SECURITY_L2 ||
++        !bt_gatt_is_subscribed(conn, &hpr_service.attrs[7], BT_GATT_CCC_NOTIFY)) { return; }
++    uint16_t mtu = bt_gatt_get_mtu(conn);
++    size_t capacity = mtu > 3 ? MIN((size_t)(mtu - 3), (size_t)HPR_MAX_PACKET) : 0;
++    if (capacity < HPR_HEADER + 4) { atomic_inc(&tx_failures); return; }
++    uint8_t payload[HPR_MAX_PACKET];
++    uint16_t rate = hpr_rate_hz(ctx->signal);
++    uint8_t flags = HPR_FLAG_TIME_ESTIMATED |
++                    ((ctx->signal <= HPR_GSR || ctx->signal == HPR_TEMP) ? HPR_FLAG_SIGNED : 0);
++    size_t offset = 0, max_count = (capacity - HPR_HEADER) / 4;
++    while (offset < ctx->count) {
++        size_t count = MIN(max_count, (size_t)ctx->count - offset);
++        size_t length = hpr_encode(payload, capacity, ctx->signal, flags, boot_id,
++                                    ctx->stamp, ctx->samples, offset, count, rate);
++        if (bt_gatt_notify(conn, &hpr_service.attrs[7], payload, length)) {
++            atomic_inc(&tx_failures);
++        }
++        offset += count;
++    }
++}
++
++void hpi_research_send(uint8_t signal, const struct hpr_stamp *stamp,
++                       const void *samples, uint8_t count)
++{
++    if (signal < 1 || signal > HPR_LAST_SIGNAL || !count || !samples || !stamp || hpi_dfu_is_active()) { return; }
++    struct send_context ctx = {.signal = signal, .count = count, .samples = samples, .stamp = stamp};
++    bt_conn_foreach(BT_CONN_TYPE_LE, send_to, &ctx);
++}
++
++static int research_init(void)
++{
++    boot_id = sys_rand32_get();
++    if (!boot_id) { boot_id = 1; }
++    publish_status(NULL, 0, 0, 0, R_ACCEPTED);
++    return 0;
++}
++SYS_INIT(research_init, APPLICATION, 80);
+--- /dev/null
++++ b/app/src/hpi_research.h
+@@ -0,0 +1,20 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef HPI_RESEARCH_H
++#define HPI_RESEARCH_H
++#include <stdbool.h>
++#include <stdint.h>
++#include "hpi_research_wire.h"
++
++/* Call at the producer, before attempting to enqueue the sensor batch. */
++void hpi_research_stamp(uint8_t signal, struct hpr_stamp *stamp, uint8_t count);
++/* Called from data thread with the producer stamp, never retimestamp on send. */
++void hpi_research_send(uint8_t signal, const struct hpr_stamp *stamp,
++                       const void *samples, uint8_t count);
++/* Scalar value converted to int32: HR=bpm, temperature=C*100, SpO2=%, battery=%. */
++void hpi_research_scalar(uint8_t signal, int32_t value);
++/* Hooks report actual state-machine transitions, not merely accepted commands. */
++void hpi_research_state(uint8_t target, uint8_t state);
++bool hpi_research_remote_owned(uint8_t target);
++bool hpi_research_local_allowed(uint8_t target);
++void hpi_research_finger_busy(bool busy);
++#endif
+--- /dev/null
++++ b/app/src/hpi_research_wire.h
+@@ -0,0 +1,85 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef HPI_RESEARCH_WIRE_H
++#define HPI_RESEARCH_WIRE_H
++#include <stddef.h>
++#include <stdint.h>
++
++#define HPR_VERSION 1
++#define HPR_HEADER 16
++#define HPR_STATUS_SIZE 20
++#define HPR_MAX_PACKET 244
++#define HPR_ECG 1
++#define HPR_GSR 2
++#define HPR_WRIST 3
++#define HPR_FINGER 4
++#define HPR_HR 5
++#define HPR_TEMP 6
++#define HPR_SPO2 7
++#define HPR_BATTERY 8
++#define HPR_WRIST_RED 9
++#define HPR_WRIST_IR 10
++#define HPR_FINGER_RED 11
++#define HPR_LAST_SIGNAL HPR_FINGER_RED
++#define HPR_IDLE 0
++#define HPR_STARTING 1
++#define HPR_WAITING 2
++#define HPR_MEASURING 3
++#define HPR_COMPLETE 4
++#define HPR_CANCELLED 5
++#define HPR_ERROR 6
++#define HPR_STOPPING 7
++#define HPR_FLAG_TIME_ESTIMATED 1
++#define HPR_FLAG_SIGNED 2
++
++struct hpr_stamp {
++    uint32_t first_index;
++    uint32_t first_ms;
++};
++
++/* Existing IDs are a wire contract. Additional optical channels share their
++ * sensor batch's index and timestamp so receivers can align them exactly by
++ * boot ID + source sensor + sample index (time remains an estimate). */
++static inline uint16_t hpr_rate_hz(uint8_t signal)
++{
++    switch (signal) {
++    case HPR_ECG: return 128;
++    case HPR_GSR: return 32;
++    case HPR_WRIST:
++    case HPR_WRIST_RED:
++    case HPR_WRIST_IR: return 25;
++    case HPR_FINGER:
++    case HPR_FINGER_RED: return 100;
++    default: return 0;
++    }
++}
++
++static inline void hpr_put32(uint8_t *p, uint32_t value)
++{
++    for (unsigned i = 0; i < 4; ++i) { p[i] = (uint8_t)(value >> (8 * i)); }
++}
++
++/* Returns zero for invalid inputs or MTU too small; otherwise bytes produced.
++ * signed/unsigned int32 wire representation is identical. */
++static inline size_t hpr_encode(uint8_t *out, size_t capacity, uint8_t signal,
++                                uint8_t flags, uint32_t boot_id,
++                                const struct hpr_stamp *stamp, const void *samples,
++                                size_t offset, size_t count, uint32_t rate)
++{
++    if (!out || !stamp || !samples || !count || count > 255 ||
++        (!rate && (count != 1 || offset != 0)) ||
++        signal < 1 || signal > HPR_LAST_SIGNAL || capacity < HPR_HEADER + count * 4) { return 0; }
++    out[0] = HPR_VERSION; out[1] = signal; out[2] = flags; out[3] = (uint8_t)count;
++    hpr_put32(out + 4, boot_id);
++    hpr_put32(out + 8, stamp->first_index + (uint32_t)offset);
++    hpr_put32(out + 12, stamp->first_ms + (rate ? (uint32_t)(offset * 1000 / rate) : 0));
++    /* memcpy avoids type-punning signed sample arrays through uint32_t*. */
++    const uint8_t *src = (const uint8_t *)samples + offset * 4;
++    for (size_t i = 0; i < count; ++i) {
++        uint32_t value;
++        unsigned char *v = (unsigned char *)&value;
++        for (unsigned j = 0; j < 4; ++j) { v[j] = src[i * 4 + j]; }
++        hpr_put32(out + HPR_HEADER + i * 4, value);
++    }
++    return HPR_HEADER + count * 4;
++}
++#endif
+--- a/app/src/sm/smf_ecg_bioz.c
++++ b/app/src/sm/smf_ecg_bioz.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move
+  * 
+@@ -419,6 +420,8 @@
+  * thread renders the inline EDA monitor phase from - mirrors ecg_pub_stream(). */
+ static void gsr_pub_status(uint8_t status, int remaining, bool contact)
+ {
++    hpi_research_state(HPR_GSR, status == HPI_GSR_STATUS_COMPLETE ? HPR_COMPLETE :
++        status == HPI_GSR_STATUS_STREAMING ? (contact ? HPR_MEASURING : HPR_WAITING) : HPR_IDLE);
+     struct hpi_gsr_status_t s = {
+         .elapsed_s = (uint16_t)(GSR_MEASUREMENT_DURATION_S - remaining),
+         .remaining_s = (uint16_t)remaining,
+@@ -566,6 +569,7 @@
+ 
+         if (get_ecg_active() || get_gsr_active())
+         {
++    hpi_research_stamp(HPR_ECG, &ecg_sensor_sample.research_stamp, ecg_sensor_sample.ecg_num_samples);
+     int ret = k_msgq_put(&q_ecg_sample, &ecg_sensor_sample, K_NO_WAIT);
+             if (ret != 0) {
+                 LOG_WRN("ECG/GSR sample dropped - queue full (ret=%d)", ret);
+@@ -663,6 +667,7 @@
+         for (int i = 0; i < sample.bioz_num_samples && i < BIOZ_POINTS_PER_SAMPLE; i++) {
+             bsample.bioz_samples[i] = sample.bioz_sample[i];
+         }
++        hpi_research_stamp(HPR_GSR, &bsample.research_stamp, bsample.bioz_num_samples);
+         int ret = k_msgq_put(&q_bioz_sample, &bsample, K_NO_WAIT);
+         if (ret != 0) {
+             LOG_WRN("BioZ sample dropped - bqueue full (ret=%d)", ret);
+@@ -901,6 +906,8 @@
+ 
+ static void st_ecg_idle_entry(void *o)
+ {
++    hpi_research_state(HPR_ECG, HPR_IDLE);
++    hpi_research_state(HPR_GSR, HPR_IDLE);
+     int ret;
+ 
+     LOG_INF("ECG SMF: Entering IDLE state");
+@@ -1152,6 +1159,7 @@
+  */
+ static void st_ecg_wait_for_lead_entry(void *o)
+ {
++    hpi_research_state(HPR_ECG, HPR_WAITING);
+     int ret;
+ 
+     LOG_INF("ECG SMF: Entering WAIT_FOR_LEAD state");
+@@ -1413,6 +1421,7 @@
+  */
+ static void st_ecg_recording_entry(void *o)
+ {
++    hpi_research_state(HPR_ECG, HPR_MEASURING);
+     int duration = ECG_RECORD_DURATION_S;
+ 
+     LOG_INF("ECG SMF: Entering RECORDING state - %d seconds", duration);
+@@ -1515,6 +1524,7 @@
+ 
+     /* Latch before the branches below mutate the flag. */
+     const bool success = !ecg_cancellation;
++    hpi_research_state(HPR_ECG, success ? HPR_COMPLETE : HPR_CANCELLED);
+ 
+     ecg_complete_entry_ms = k_uptime_get_32();
+ 
+--- a/app/src/sm/smf_ppg_finger.c
++++ b/app/src/sm/smf_ppg_finger.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move
+  * 
+@@ -398,6 +399,7 @@
+             }
+         }
+ 
++        hpi_research_stamp(HPR_FINGER, &ppg_sensor_sample.research_stamp, ppg_sensor_sample.ppg_num_samples);
+         if (k_msgq_put(&q_ppg_fi_sample, &ppg_sensor_sample, K_MSEC(1)) != 0)
+         {
+             static uint32_t fi_drops = 0;
+@@ -670,6 +672,8 @@
+ 
+ static void st_ppg_fing_idle_entry(void *o)
+ {
++    hpi_research_finger_busy(false);
++    hpi_research_state(HPR_FINGER, HPR_IDLE);
+     LOG_DBG("PPG Finger SM Idle Entry");
+     k_sem_give(&sem_stop_fi_sampling);
+     atomic_set(&bpt_process_done, 0);
+@@ -713,6 +717,7 @@
+ 
+     if (hpi_evt_consume(&fi_evt, EVT_BPT_EST_START))
+     {
++        if (!hpi_research_local_allowed(HPR_FINGER)) { return SMF_EVENT_HANDLED; }
+         // Check if calibration data is available before proceeding
+         if (hpi_bpt_cal_data_available())
+         {
+@@ -731,6 +736,7 @@
+ 
+     if (hpi_evt_consume(&fi_evt, EVT_BPT_ENTER_CAL))
+     {
++        if (!hpi_research_local_allowed(HPR_FINGER)) { return SMF_EVENT_HANDLED; }
+         LOG_INF("sem_bpt_enter_mode_cal received - entering BPT calibration mode");
+         s->ppg_fi_op_mode = PPG_FI_OP_MODE_BPT_CAL;
+         // Route through CHECK_SENSOR to ensure sensor is connected before showing wait screen
+@@ -747,6 +753,7 @@
+      * EVT_BPT_ENTER_CAL (UI may skip the intermediate mode). Route CHECK_SENSOR first. */
+     if (hpi_evt_consume(&fi_evt, EVT_BPT_CAL_START))
+     {
++        if (!hpi_research_local_allowed(HPR_FINGER)) { return SMF_EVENT_HANDLED; }
+         LOG_INF("BPT calibration start from IDLE - checking sensor first");
+         s->ppg_fi_op_mode = PPG_FI_OP_MODE_BPT_CAL;
+         // Store that we have cal values ready and should proceed to calibration after sensor check
+@@ -790,6 +797,7 @@
+    // LOG_DBG("PPG Finger SM BPT Calibration Running");
+     if (hpi_evt_consume(&fi_evt, EVT_BPT_CAL_START))
+     {
++        if (!hpi_research_local_allowed(HPR_FINGER)) { return SMF_EVENT_HANDLED; }
+         LOG_INF("sem_bpt_cal_start received in CAL_WAIT state - starting calibration");
+         // Turn off timeout
+        // k_timer_stop(&tmr_bpt_cal_timeout);
+@@ -1047,6 +1055,8 @@
+ 
+ static void st_ppg_fi_check_sensor_entry(void *o)
+ {
++    hpi_research_finger_busy(true);
++    hpi_research_state(HPR_FINGER, HPR_WAITING);
+     struct s_ppg_fi_object *s = (struct s_ppg_fi_object *)o;
+     LOG_DBG("PPG Finger SM Check Sensor Entry, op_mode=%d", s->ppg_fi_op_mode);
+ 
+@@ -1150,6 +1160,7 @@
+ 
+ static void st_ppg_fi_sensor_fail_entry(void *o)
+ {
++    hpi_research_state(HPR_FINGER, HPR_ERROR);
+     LOG_DBG("PPG Finger SM Sensor Fail Entry");
+     hpi_hw_fi_sensor_off();
+     // Show error screen
+@@ -1165,6 +1176,7 @@
+ 
+ static void st_ppg_fi_spo2_est_entry(void *o)
+ {
++    hpi_research_state(HPR_FINGER, HPR_MEASURING);
+     LOG_DBG("PPG Finger SM SpO2 Estimation Entry");
+     sens_decode_ppg_fi_op_mode = PPG_FI_OP_MODE_SPO2_EST;
+     atomic_set(&spo2_process_done, 0);  // Reset completion flag for new measurement
+@@ -1229,6 +1241,7 @@
+ 
+ static void st_ppg_fi_spo2_est_done_entry(void *o)
+ {
++    hpi_research_state(HPR_FINGER, HPR_COMPLETE);
+     LOG_DBG("PPG Finger SM SpO2 Estimation Done Entry");
+     hpi_load_scr_spl(SCR_SPL_SPO2_RESULT, SCROLL_NONE, SCR_SPO2, HPI_SPO2_RESULT_SUCCESS, m_est_spo2, 0);
+     hpi_hw_fi_sensor_off();
+@@ -1244,6 +1257,7 @@
+ 
+ static void st_ppg_fi_wait_for_contact_entry(void *o)
+ {
++    hpi_research_state(HPR_FINGER, HPR_WAITING);
+     struct s_ppg_fi_object *s = (struct s_ppg_fi_object *)o;
+     LOG_DBG("PPG Finger SM Wait for Contact Entry");
+     wait_start_ts = k_uptime_get();
+@@ -1406,4 +1420,4 @@
+ #define PPG_FI_CTRL_THREAD_PRIORITY 7
+ 
+ K_THREAD_DEFINE(ppg_finger_smf_thread, SMF_PPG_FINGER_THREAD_STACKSIZE, smf_ppg_finger_thread, NULL, NULL, NULL, SMF_PPG_FINGER_THREAD_PRIORITY, 0, 500);
+-K_THREAD_DEFINE(ppg_finger_ctrl_thread, PPG_FI_CTRL_THREAD_STACKSIZE, ppg_fi_ctrl_thread, NULL, NULL, NULL, PPG_FI_CTRL_THREAD_PRIORITY, 0, 500);
+\ No newline at end of file
++K_THREAD_DEFINE(ppg_finger_ctrl_thread, PPG_FI_CTRL_THREAD_STACKSIZE, ppg_fi_ctrl_thread, NULL, NULL, NULL, PPG_FI_CTRL_THREAD_PRIORITY, 0, 500);
+--- a/app/src/sm/smf_ppg_wrist.c
++++ b/app/src/sm/smf_ppg_wrist.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move
+  *
+@@ -468,6 +469,7 @@
+              * which keeps true off-skin noise out of BLE streaming and recording. */
+             if (ppg_sensor_sample.scd_state != MAX32664C_SCD_STATE_OFF_SKIN)
+             {
++                hpi_research_stamp(HPR_WRIST, &ppg_sensor_sample.research_stamp, ppg_sensor_sample.ppg_num_samples);
+                 if (k_msgq_put(&q_ppg_wrist_sample, &ppg_sensor_sample, K_MSEC(1)) != 0)
+                 {
+                     static uint32_t wr_drops = 0;
+@@ -904,6 +906,7 @@
+             k_timer_start(&tmr_ppg_wrist_sampling, K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS), K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS));
+ 
+             atomic_set(&spo2_measurement_in_progress, 1);
++            hpi_research_state(HPR_WRIST, HPR_MEASURING);
+             /* H-REC: bracket the wrist SpO2 spot-check. Completion/timeout post
+              * EVT_SPO2_STOP (handled below) and user cancel posts EVT_SPO2_CANCEL,
+              * so every teardown path funnels through the two handlers below. */
+@@ -920,6 +923,7 @@
+             uint16_t m_est_spo2 = 0;
+             enum spo2_meas_state m_est_spo2_status = SPO2_MEAS_UNK;
+             get_measured_spo2(&m_est_spo2, &m_est_spo2_status);
++            hpi_research_state(HPR_WRIST, m_est_spo2_status == SPO2_MEAS_SUCCESS ? HPR_COMPLETE : HPR_ERROR);
+             if (m_est_spo2_status == SPO2_MEAS_SUCCESS)
+             {
+                 LOG_DBG("SPO2 Measurement Successful: %d", m_est_spo2);
+@@ -950,6 +954,7 @@
+             if (atomic_get(&spo2_measurement_in_progress))
+             {
+                 LOG_DBG("Cancelling One Shot SpO2 (user initiated)");
++                hpi_research_state(HPR_WRIST, HPR_CANCELLED);
+                 k_timer_stop(&tmr_ppg_wrist_sampling);
+                 atomic_set(&spo2_measurement_in_progress, 0);
+                 hpi_data_set_ppg_wrist_record_active(false);   // H-REC: finalize capture
+@@ -976,4 +981,4 @@
+ #define SMF_PPG_THREAD_PRIORITY 7
+ 
+ K_THREAD_DEFINE(smf_ppg_thread_id, SMF_PPG_THREAD_STACKSIZE, smf_ppg_wrist_thread, NULL, NULL, NULL, SMF_PPG_THREAD_PRIORITY, 0, 1000);
+-K_THREAD_DEFINE(ppg_ctrl_thread_id, PPG_CTRL_THREAD_STACKSIZE, ppg_wrist_ctrl_thread, NULL, NULL, NULL, PPG_CTRL_THREAD_PRIORITY, 0, 0);
+\ No newline at end of file
++K_THREAD_DEFINE(ppg_ctrl_thread_id, PPG_CTRL_THREAD_STACKSIZE, ppg_wrist_ctrl_thread, NULL, NULL, NULL, PPG_CTRL_THREAD_PRIORITY, 0, 0);
+--- a/app/src/ui/screens/scr_bpt_scr2.c
++++ b/app/src/ui/screens/scr_bpt_scr2.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move
+  * 
+@@ -53,6 +54,7 @@
+ 
+ static void scr_bpt_btn_proceed_handler(lv_event_t *e)
+ {
++    if (!hpi_research_local_allowed(HPR_FINGER)) { return; }
+     ARG_UNUSED(e);
+     // Only signal the state machine - it handles the screen transitions
+     // (this avoids a race when calibration is required).
+--- a/app/src/ui/screens/scr_ecg_monitor.c
++++ b/app/src/ui/screens/scr_ecg_monitor.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move — ECG monitor (v2 carousel tile)
+  *
+@@ -143,6 +144,7 @@
+ 
+ static void ecg_start_cb(lv_event_t *e)
+ {
++    if (!hpi_research_local_allowed(HPR_ECG)) { return; }
+     ARG_UNUSED(e);
+     /* Arm the SMF and optimistically show waiting-for-leads; the SMF status
+      * then drives every subsequent transition. */
+@@ -197,6 +199,7 @@
+  * attended finger-on-electrode capture rather than recording in the background. */
+ void hpi_ecg_monitor_leave(void)
+ {
++    if (hpi_research_remote_owned(HPR_ECG)) { return; }
+     if (g_ecg_active) {
+         g_ecg_active = false;
+         k_event_post(&ecg_evt, EVT_ECG_CANCEL);
+--- a/app/src/ui/screens/scr_eda_monitor.c
++++ b/app/src/ui/screens/scr_eda_monitor.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move — EDA / GSR monitor tile (v2 design, carousel)
+  *
+@@ -109,6 +110,7 @@
+ 
+ static void eda_measure_cb(lv_event_t *e)
+ {
++    if (!hpi_research_local_allowed(HPR_GSR)) { return; }
+     ARG_UNUSED(e);
+     /* Arm the SMF and optimistically show the waiting-for-contact view for
+      * responsiveness; the SMF's status then drives every subsequent transition,
+@@ -171,6 +173,7 @@
+  * so cancel rather than leave it capturing invisibly in the background. */
+ void hpi_eda_monitor_leave(void)
+ {
++    if (hpi_research_remote_owned(HPR_GSR)) { return; }
+     if (g_gsr_active) {
+         g_gsr_active = false;
+         k_event_post(&ecg_evt, EVT_GSR_CANCEL);
+--- a/app/src/ui/screens/scr_spo2_monitor.c
++++ b/app/src/ui/screens/scr_spo2_monitor.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move — SpO2 monitor (v2 design 1a, carousel tile)
+  *
+@@ -92,6 +93,7 @@
+ 
+ static void spo2_start_cb(lv_event_t *e)
+ {
++    if (!hpi_research_local_allowed(HPR_WRIST)) { return; }
+     ARG_UNUSED(e);
+ 
+     if (s_source == SPO2_SOURCE_PPG_FI) {
+--- a/app/src/ui/screens/scr_spo2_result.c
++++ b/app/src/ui/screens/scr_spo2_result.c
+@@ -1,3 +1,4 @@
++#include "hpi_research.h"
+ /*
+  * HealthyPi Move
+  *
+@@ -39,6 +40,7 @@
+ /* AGAIN — restart the same source, mirroring the idle tile's START branch. */
+ static void spo2_result_again_cb(lv_event_t *e)
+ {
++    if (!hpi_research_local_allowed(HPR_WRIST)) { return; }
+     ARG_UNUSED(e);
+ 
+     if (hpi_spo2_source_get() == SPO2_SOURCE_PPG_FI) {
+--- /dev/null
++++ b/docs/RESEARCH_PPG.md
+@@ -0,0 +1,70 @@
++# Additional live PPG channels
++
++This change extends the existing custom research service in this checkout. It
++does not change the original vendor waveform characteristics. The new channels
++are sent on encrypted research DATA notifications, UUID
++`a17e0003-4d52-4f56-9100-524553454152`.
++
++| Signal ID | Python name | Source array | Nominal rate |
++|---|---|---|---|
++| 3 (existing) | ppg_wrist | wrist raw_green | 25 Hz |
++| 4 (existing) | ppg_finger | finger raw_ir | 100 Hz |
++| 9 (new) | ppg_wrist_red | wrist raw_red | 25 Hz |
++| 10 (new) | ppg_wrist_ir | wrist raw_ir | 25 Hz |
++| 11 (new) | ppg_finger_red | finger raw_red | 100 Hz |
++
++IDs 1 through 8 and all control target IDs retain their previous meanings.
++The packet version stays 1: the layout is unchanged, with appended signal IDs.
++Old research decoders must be updated to accept the new IDs. A client handling
++this version should ignore unknown signal IDs rather than label them incorrectly.
++The supplied reference decoder in `tools/research_protocol.py` understands all
++11 signals. The project's Python GUI and Flutter app still need integration
++with this custom service before they can show or save the additional channels.
++
++All five PPG streams carry unsigned little-endian 32-bit driver values with a
++16-byte research header. The current driver assembles optical FIFO words and
++right-shifts them by four bits; this patch forwards those existing values without
++additional filtering, conversion or invented replacements. These are optical
++waveforms, not separate heart-rate or SpO2 results.
++
++The wrist red/IR packets reuse the green batch's producer stamp. Finger red
++reuses the finger IR batch's stamp. Channels from the same sensor batch therefore
++have the same boot ID, first sample index, sample count and estimated uptime.
++Counters are allocated once per source batch before queuing, so a dropped source
++batch advances all its channels. Individual BLE sends can still fail separately;
++track continuity per signal and join channels by boot ID and sample index, not
++by notification arrival order. ATT-MTU fragmentation applies the same index/time
++offsets to each channel. No extra sensor queue copies or sample arrays are added.
++
++The existing sensor modes, skin-contact gates, finite measurement durations and
++nominal rates are unchanged. Red/IR validity and LED activity depend on the hub
++mode and must be checked on the watch. In particular, zero values must not be
++presented as evidence of a valid active optical channel. Wrist and finger sensors
++are not made exactly synchronized by sharing stamps within their own batches.
++
++Bandwidth increases: wrist PPG has three research streams and finger PPG has
++two. At the nominal rates, the additional raw sample bytes alone total 600
++bytes/s when both sources are active; headers, BLE overhead and legacy streams
++are extra. A larger negotiated MTU reduces overhead. Check gaps and notification
++failures under actual load, particularly at MTU 23. Failed sends are not retried.
++
++## Validation
++
++Reference Python protocol tests cover the new channel names/rates, unsigned
++values, multiple samples, scalar validation, flags and per-channel gap tracking.
++The host C codec test covers the actual encoder, new IDs, unsigned values,
++small-MTU offsets, invalid IDs and unchanged legacy packet behavior.
++
++A successful host test is not a Nordic firmware build or a hardware test. The
++delivery README records whether a target update image was actually produced.
++Only a generated, compatible `dfu_application.zip` is an installable OTA package;
++a source overlay ZIP must not be selected in the watch updater. Preserve the
++installed bootloader's signing key and select an accepted firmware image version
++when producing the target build. Do not replace the watch bootloader just to
++make a source build installable.
++
++Hardware acceptance: pair/encrypt, subscribe to research DATA, start the required
++measurement, verify IDs 3/9/10 for wrist and 4/11 for finger, inspect optical
++response and values in each mode, compare indices across channels, then record
++long enough to measure throughput and gaps. Also confirm original phone-app
++streaming and measurement controls still behave correctly.
+--- /dev/null
++++ b/tests/research_protocol/test_protocol.py
+@@ -0,0 +1,79 @@
++"""Run: python -m unittest discover -s fw/tests/research_protocol -p test_protocol.py -v"""
++from pathlib import Path
++import struct
++import sys
++import unittest
++sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
++from research_protocol import command, decode_data, decode_status, Continuity
++
++
++class ProtocolTests(unittest.TestCase):
++    def packet(self, index=0, boot=42, signal=1, values=(-12, 1000), millis=1000):
++        flags = 3 if signal in (1, 2, 6) else 1
++        return decode_data(struct.pack("<4BIII", 1, signal, flags, len(values), boot, index, millis) +
++                           struct.pack("<" + ("i" if flags == 3 else "I") * len(values), *values))
++
++    def test_commands(self):
++        self.assertEqual(command("start", "ecg", 7), bytes([1, 1, 1, 7]))
++        self.assertEqual(command("stop", "finger_spo2", 8), bytes([1, 2, 4, 8]))
++        with self.assertRaises(ValueError): command("start", 0)
++        with self.assertRaises(ValueError): command("status", 0, 0)
++
++    def test_values(self):
++        self.assertEqual(self.packet()["values"], [-12, 1000])
++        self.assertEqual(self.packet(signal=6, values=(3341,))["values"], [33.41])
++        self.assertEqual(self.packet(signal=3, values=(4000000000,))["values"], [4000000000])
++        with self.assertRaises(ValueError): decode_data(bytes(20))
++        with self.assertRaises(ValueError): decode_data(bytes(19))
++
++    def test_continuity(self):
++        tracker = Continuity()
++        self.assertEqual(tracker.observe(self.packet(100))["state"], "baseline")
++        self.assertEqual(tracker.observe(self.packet(102))["missing"], 0)
++        self.assertEqual(tracker.observe(self.packet(107))["missing"], 3)
++        self.assertEqual(tracker.observe(self.packet(107))["state"], "duplicate_or_out_of_order")
++        self.assertEqual(tracker.observe(self.packet(109))["state"], "continuous")
++        self.assertEqual(tracker.observe(self.packet(0, boot=43))["state"], "device_reboot_or_new_boot_id")
++
++    def test_counter_wrap(self):
++        tracker = Continuity()
++        tracker.observe(self.packet(0xfffffffe))
++        self.assertEqual(tracker.observe(self.packet(0))["state"], "continuous")
++
++    def test_status(self):
++        status = decode_status(struct.pack("<8BIII", 1, 7, 1, 1, 0, 2, 1, 1, 42, 999, 0))
++        self.assertEqual(status["state"], "waiting_for_contact")
++        self.assertEqual(status["request_id"], 7)
++
++    def test_additional_ppg_channels(self):
++        for signal, name, hz in ((9, "ppg_wrist_red", 25),
++                                 (10, "ppg_wrist_ir", 25),
++                                 (11, "ppg_finger_red", 100)):
++            with self.subTest(signal=signal):
++                p = self.packet(signal=signal, values=(0, 4000000000, 4294967295))
++                self.assertEqual(p["signal"], name)
++                self.assertEqual(p["nominal_hz"], hz)
++                self.assertEqual(p["wire_values"], [0, 4000000000, 4294967295])
++
++    def test_ppg_channels_have_independent_continuity(self):
++        tracker = Continuity()
++        for signal in (3, 9, 10):
++            self.assertEqual(tracker.observe(self.packet(100, signal=signal, values=(1, 2)))["state"], "baseline")
++        self.assertEqual(tracker.observe(self.packet(104, signal=9, values=(1, 2)))["missing"], 2)
++        for signal in (3, 10):
++            self.assertEqual(tracker.observe(self.packet(102, signal=signal, values=(1, 2)))["state"], "continuous")
++
++    def test_scalar_and_unknown_signal_validation(self):
++        for signal in (5, 6, 7, 8):
++            with self.assertRaises(ValueError):
++                self.packet(signal=signal, values=(1, 2))
++        with self.assertRaises(ValueError):
++            self.packet(signal=12, values=(1,))
++
++    def test_ppg_rejects_signed_flag(self):
++        for signal in (9, 10, 11):
++            with self.assertRaises(ValueError):
++                decode_data(struct.pack("<4BIIII", 1, signal, 3, 1, 42, 0, 0, 100))
++
++
++if __name__ == "__main__": unittest.main()
+--- /dev/null
++++ b/tests/research_protocol/wire_test.c
+@@ -0,0 +1,44 @@
++/* SPDX-License-Identifier: MIT */
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include "hpi_research_wire.h"
++
++int main(void)
++{
++    uint8_t out[244];
++    const int32_t samples[] = {-12, 1000, 2000, 3000};
++    struct hpr_stamp stamp = {.first_index = 0xfffffffeu, .first_ms = 1000};
++    /* Default ATT MTU 23: payload 20, header 16, exactly one sample fits. */
++    assert(hpr_encode(out, 20, HPR_ECG, 3, 0x12345678, &stamp, samples, 0, 1, 128) == 20);
++    assert(out[0] == 1 && out[1] == 1 && out[2] == 3 && out[3] == 1);
++    assert(out[4] == 0x78 && out[5] == 0x56 && out[6] == 0x34 && out[7] == 0x12);
++    assert(out[16] == 0xf4 && out[17] == 0xff && out[19] == 0xff);
++    assert(hpr_encode(out, 19, HPR_ECG, 3, 1, &stamp, samples, 0, 1, 128) == 0);
++    assert(hpr_encode(out, 20, HPR_ECG, 3, 1, &stamp, samples, 0, 2, 128) == 0);
++    assert(hpr_encode(out, 244, HPR_ECG, 3, 1, &stamp, samples, 2, 2, 128) == 24);
++    assert(out[8] == 0 && out[9] == 0 && out[10] == 0 && out[11] == 0);
++    assert(out[12] == 0xf7 && out[13] == 3); /* 1000 + floor(2000/128) = 1015 */
++    int32_t temp = 3341;
++    assert(hpr_encode(out, 20, HPR_TEMP, 3, 1, &stamp, &temp, 0, 1, 0) == 20);
++    assert(hpr_encode(out, 20, HPR_TEMP, 3, 1, &stamp, &temp, 1, 1, 0) == 0);
++    const uint32_t optical[] = {0, 4000000000u, 4294967295u};
++    const uint8_t channels[] = {HPR_WRIST_RED, HPR_WRIST_IR, HPR_FINGER_RED};
++    for (size_t i = 0; i < sizeof(channels); ++i) {
++        uint8_t signal = channels[i];
++        uint16_t rate = hpr_rate_hz(signal);
++        assert(rate == (signal == HPR_FINGER_RED ? 100 : 25));
++        assert(hpr_encode(out, sizeof(out), signal, 1, 42, &stamp, optical, 0, 3, rate) == 28);
++        assert(out[1] == signal && out[2] == 1 && out[3] == 3);
++        assert(out[20] == 0 && out[21] == 0x28 && out[22] == 0x6b && out[23] == 0xee);
++        assert(out[24] == 0xff && out[27] == 0xff);
++        /* MTU 23: second sample keeps the source batch's index/time offset. */
++        assert(hpr_encode(out, 20, signal, 1, 42, &stamp, optical, 1, 1, rate) == 20);
++        assert(out[8] == 0xff && out[11] == 0xff);
++        uint32_t millis = 1000 + 1000 / rate;
++        assert(out[12] == (uint8_t)millis && out[13] == (uint8_t)(millis >> 8));
++    }
++    assert(hpr_encode(out, sizeof(out), HPR_LAST_SIGNAL + 1, 1, 1, &stamp, optical, 0, 1, 25) == 0);
++    puts("PASS: header, endian, signed values, MTU limits, splitting offsets, wrap and scalars");
++    return 0;
++}
+--- /dev/null
++++ b/tools/build_research.py
+@@ -0,0 +1,40 @@
++"""Build with Python from a Nordic toolchain environment; never flashes a device."""
++import argparse
++from pathlib import Path
++import subprocess
++import sys
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('--sdk-root', type=Path, required=True)
++    parser.add_argument('--pristine', action='store_true')
++    options = parser.parse_args()
++    fw = Path(__file__).resolve().parents[1]
++    sdk = options.sdk_root.resolve()
++    if not (sdk / '.west').is_dir():
++        parser.error('--sdk-root must contain the installed SDK .west directory')
++    log = fw.parent / 'output/firmware/nordic_build.log'
++    log.parent.mkdir(parents=True, exist_ok=True)
++    args = [sys.executable, '-m', 'west', 'build', str(fw / 'app'),
++            '--build-dir', str(fw / 'build'),
++            '--board', 'healthypi_move/nrf5340/cpuapp']
++    if options.pristine:
++        args.append('--pristine')
++    args += ['--', '-DNCS_TOOLCHAIN_VERSION=NONE',
++             '-DBOARD_ROOT=' + fw.as_posix(),
++             '-DZEPHYR_EXTRA_MODULES=' + fw.as_posix()]
++    # Keep each CMake path in a single argument through the Windows launcher.
++    with log.open('w', encoding='utf-8') as output:
++        proc = subprocess.Popen(args, cwd=sdk, stdout=subprocess.PIPE,
++                                stderr=subprocess.STDOUT, text=True,
++                                encoding='utf-8', errors='replace')
++        for line in proc.stdout:
++            output.write(line)
++            output.flush()
++            print(line, end='', flush=True)
++        return proc.wait()
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+--- /dev/null
++++ b/tools/research_protocol.py
+@@ -0,0 +1,81 @@
++"""Reference codec for the custom HPR1 service; this does not flash the watch."""
++import struct
++
++SERVICE = "a17e0000-4d52-4f56-9100-524553454152"
++CONTROL = "a17e0001-4d52-4f56-9100-524553454152"
++STATUS = "a17e0002-4d52-4f56-9100-524553454152"
++DATA = "a17e0003-4d52-4f56-9100-524553454152"
++TARGETS = {"ecg": 1, "gsr": 2, "wrist_spo2": 3, "finger_spo2": 4}
++SIGNALS = {1: ("ecg", 128), 2: ("gsr", 32), 3: ("ppg_wrist", 25),
++           4: ("ppg_finger", 100), 5: ("hr", None), 6: ("temp", None),
++           7: ("spo2", None), 8: ("battery", None),
++           9: ("ppg_wrist_red", 25), 10: ("ppg_wrist_ir", 25),
++           11: ("ppg_finger_red", 100)}
++STATES = {0: "idle", 1: "starting", 2: "waiting_for_contact", 3: "measuring",
++          4: "complete", 5: "cancelled", 6: "error", 7: "stopping"}
++RESULTS = {0: "accepted", 1: "busy", 2: "invalid", 3: "not_owner",
++           4: "unsupported", 5: "firmware_update_active"}
++
++
++def command(action, target=0, request_id=1):
++    opcode = {"start": 1, "stop": 2, "status": 3}[action]
++    target = TARGETS[target] if isinstance(target, str) else target
++    if target not in range(5) or (opcode != 3 and target == 0):
++        raise ValueError("Invalid measurement target")
++    if request_id not in range(1, 256):
++        raise ValueError("request_id must be 1..255; zero is reserved")
++    return bytes([1, opcode, target, request_id])
++
++
++def decode_status(payload):
++    if len(payload) != 20 or payload[0] != 1:
++        raise ValueError("Unknown status format")
++    version, rid, opcode, target, result, state, mask, flags, boot, uptime, failures = struct.unpack(
++        "<8BIII", payload)
++    if target > 4 or state not in STATES or result not in RESULTS:
++        raise ValueError("Invalid status fields")
++    return dict(version=version, request_id=rid, opcode=opcode, target=target,
++                result=RESULTS[result], state=STATES[state], active_mask=mask,
++                flags=flags, boot_id=boot, uptime_ms=uptime, tx_failures=failures)
++
++
++def decode_data(payload):
++    if len(payload) < 20:
++        raise ValueError("Packet too short")
++    version, signal, flags, count, boot, index, millis = struct.unpack_from("<4BIII", payload)
++    if version != 1 or signal not in SIGNALS or not count or len(payload) != 16 + 4 * count:
++        raise ValueError("Unknown packet format or invalid length")
++    signed = signal in (1, 2, 6)
++    if bool(flags & 2) != signed or not flags & 1 or flags & ~3:
++        raise ValueError("Unexpected flags")
++    if SIGNALS[signal][1] is None and count != 1:
++        raise ValueError("Scalar packet must contain one value")
++    values = list(struct.unpack_from("<" + ("i" if signed else "I") * count, payload, 16))
++    name, hz = SIGNALS[signal]
++    return dict(version=version, signal=name, signal_id=signal, boot_id=boot,
++                first_sample_index=index, estimated_first_uptime_ms=millis,
++                timestamp_is_estimated=True, nominal_hz=hz, wire_values=values,
++                values=[v / 100 for v in values] if signal == 6 else values,
++                time_basis="device-uptime/FIFO-read-backdated" if hz else "device-uptime/publication")
++
++
++class Continuity:
++    """Detect index gaps after a baseline. Gaps are not proof of radio loss."""
++    def __init__(self):
++        self.streams = {}
++
++    def observe(self, packet):
++        key = packet["signal_id"]
++        previous = self.streams.get(key)
++        boot, index = packet["boot_id"], packet["first_sample_index"]
++        state, missing = "baseline", 0
++        if previous and previous[0] == boot:
++            delta = (index - previous[1]) & 0xffffffff
++            if delta >= 0x80000000:
++                return dict(state="duplicate_or_out_of_order", missing=None)
++            missing = delta
++            state = "gap" if delta else "continuous"
++        elif previous:
++            state = "device_reboot_or_new_boot_id"
++        self.streams[key] = (boot, (index + len(packet["wire_values"])) & 0xffffffff)
++        return dict(state=state, missing=missing)

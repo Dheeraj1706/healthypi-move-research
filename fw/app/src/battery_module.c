@@ -1,0 +1,447 @@
+/*
+ * HealthyPi Move - Battery Management Module
+ *
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright (c) 2025 Protocentral Electronics
+ * Copyright (c) 2023 Nordic Semiconductor ASA
+ *
+ * Author: Ashwin Whitchurch, Protocentral Electronics
+ * Contact: ashwin@protocentral.com
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+#include "battery_module.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/drivers/sensor.h>
+#include <zephyr/drivers/fuel_gauge.h>
+#include <zephyr/drivers/sensor/npm13xx_charger.h>
+#include <stdio.h>
+#include "nrf_fuel_gauge.h"
+#include "ui/move_ui.h"
+#include "hw_module.h"
+
+LOG_MODULE_REGISTER(battery_module, LOG_LEVEL_DBG);
+
+// Battery model for fuel gauge
+static const struct battery_model battery_model = {
+#include "battery_profile_200.inc"
+};
+
+/* Static variables for fuel gauge operation.
+ * (File-scope max_charge_current / term_charge_current removed: locals of the
+ * same name in battery_fuel_gauge_init() shadowed them, so the statics were
+ * never written and the compiler warned they were unused.) */
+static int64_t ref_time;
+
+// Low battery state tracking
+static bool low_battery_screen_active = false;
+static uint8_t last_battery_level = 100;  // Store last known battery level
+static float last_battery_voltage = 4.2f; // Store last known battery voltage
+
+// battery_evaluate() latched state + debounce streaks (see HPI_BATTERY_DEBOUNCE_SAMPLES)
+static enum hpi_batt_state s_batt_state = HPI_BATT_NORMAL;
+static uint8_t s_low_streak;      // consecutive samples with SoC <= LOW
+static uint8_t s_recover_streak;  // consecutive samples with SoC >= RECOVER
+static uint8_t s_shutdown_streak; // consecutive samples below the voltage floor while not charging
+
+/**
+ * @brief Read sensors from the NPM13xx charger
+ */
+static int npm_read_sensors(const struct device *charger,
+                            float *voltage, float *current, float *temp, int32_t *chg_status)
+{
+    struct sensor_value value;
+    int ret;
+
+    ret = sensor_sample_fetch(charger);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    /* Every channel's status is checked. These four reads all shared one
+     * `struct sensor_value` and discarded the return, so a channel that failed
+     * left the previous channel's number in `value` and it was silently used as
+     * the next quantity — a failing TEMP read would have fed the fuel gauge the
+     * BATTERY VOLTAGE as a temperature (~3.9, i.e. just under the model's 5 degC
+     * floor), and a failing current read would have fed it the temperature.
+     * Both are plausible-looking numbers, so nothing downstream could tell.
+     *
+     * (All four channels are supported on this board's configuration today —
+     * thermistor-ohms = 10000 is enum index 1, so GAUGE_TEMP does not return
+     * -ENOTSUP — so this is a latent trap rather than an active fault. It costs
+     * nothing to close.) */
+    ret = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_VOLTAGE, &value);
+    if (ret < 0) {
+        LOG_ERR("Charger: GAUGE_VOLTAGE read failed (%d)", ret);
+        return ret;
+    }
+    *voltage = (float)value.val1 + ((float)value.val2 / 1000000);
+
+    ret = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_TEMP, &value);
+    if (ret < 0) {
+        LOG_ERR("Charger: GAUGE_TEMP read failed (%d)", ret);
+        return ret;
+    }
+    *temp = (float)value.val1 + ((float)value.val2 / 1000000);
+
+    ret = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_AVG_CURRENT, &value);
+    if (ret < 0) {
+        LOG_ERR("Charger: GAUGE_AVG_CURRENT read failed (%d)", ret);
+        return ret;
+    }
+    *current = (float)value.val1 + ((float)value.val2 / 1000000);
+
+    ret = sensor_channel_get(charger, SENSOR_CHAN_NPM13XX_CHARGER_STATUS, &value);
+    if (ret < 0) {
+        LOG_ERR("Charger: CHARGER_STATUS read failed (%d)", ret);
+        return ret;
+    }
+    *chg_status = value.val1;
+
+    return 0;
+}
+
+/**
+ * @brief Inform fuel gauge about charge status changes
+ */
+static int charge_status_inform(int32_t chg_status)
+{
+    union nrf_fuel_gauge_ext_state_info_data state_info;
+
+    if (chg_status & NPM1300_CHG_STATUS_COMPLETE_MASK)
+    {
+        LOG_DBG("Charge complete");
+        state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_COMPLETE;
+    }
+    else if (chg_status & NPM1300_CHG_STATUS_TRICKLE_MASK)
+    {
+        LOG_DBG("Trickle charging");
+        state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_TRICKLE;
+    }
+    else if (chg_status & NPM1300_CHG_STATUS_CC_MASK)
+    {
+        LOG_DBG("Constant current charging");
+        state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_CC;
+    }
+    else if (chg_status & NPM1300_CHG_STATUS_CV_MASK)
+    {
+        LOG_DBG("Constant voltage charging");
+        state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_CV;
+    }
+    else
+    {
+        LOG_DBG("Charger idle");
+        state_info.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_IDLE;
+    }
+
+    return nrf_fuel_gauge_ext_state_update(NRF_FUEL_GAUGE_EXT_STATE_INFO_CHARGE_STATE_CHANGE,
+                                           &state_info);
+}
+
+int battery_fuel_gauge_init(const struct device *charger)
+{
+    struct sensor_value value;
+    struct nrf_fuel_gauge_init_parameters parameters = {
+        .model = &battery_model,
+        .opt_params = NULL,
+        .state = NULL,
+    };
+
+    int32_t chg_status;
+    int ret;
+    float max_charge_current;
+	float term_charge_current;
+
+    LOG_DBG("Initializing nRF Fuel Gauge");
+
+    ret = npm_read_sensors(charger, &parameters.v0, &parameters.i0, &parameters.t0, &chg_status);
+    if (ret < 0)
+    {
+        return ret;
+    }
+    /* Zephyr sensor API convention for Gauge current is negative=discharging,
+	 * while nrf_fuel_gauge lib expects the opposite negative=charging
+	 */
+	parameters.i0 = -parameters.i0;
+
+    /* Store charge nominal and termination current, needed for ttf calculation */
+    sensor_channel_get(charger, SENSOR_CHAN_GAUGE_DESIRED_CHARGING_CURRENT, &value);
+    max_charge_current = (float)value.val1 + ((float)value.val2 / 1000000);
+    term_charge_current = max_charge_current / 10.f;
+
+    ret = nrf_fuel_gauge_init(&parameters, NULL);
+    if (ret < 0)
+    {
+        LOG_DBG("Fuel gauge init error: %d", ret);
+        return ret;
+    }
+
+    ret = nrf_fuel_gauge_ext_state_update(NRF_FUEL_GAUGE_EXT_STATE_INFO_CHARGE_CURRENT_LIMIT,
+					      &(union nrf_fuel_gauge_ext_state_info_data){
+						      .charge_current_limit = max_charge_current});
+	if (ret < 0) {
+		printk("Error: Could not set fuel gauge state\n");
+		return ret;
+	}
+
+	ret = nrf_fuel_gauge_ext_state_update(NRF_FUEL_GAUGE_EXT_STATE_INFO_TERM_CURRENT,
+					      &(union nrf_fuel_gauge_ext_state_info_data){
+						      .charge_term_current = term_charge_current});
+	if (ret < 0) {
+		printk("Error: Could not set fuel gauge state\n");
+		return ret;
+	}
+
+    ret = charge_status_inform(chg_status);
+	if (ret < 0) {
+		printk("Error: Could not set fuel gauge state\n");
+		return ret;
+	}
+
+    ref_time = k_uptime_get();
+
+    return 0;
+}
+
+int battery_fuel_gauge_update(const struct device *charger, bool vbus_connected,
+                              uint8_t *batt_level, bool *batt_charging, float *batt_voltage)
+{
+    static int32_t chg_status_prev;
+    
+    float voltage;
+    float current;
+    float temp;
+    /* Seed from the caller's previous reading, so a failed process() below holds
+     * the last good value instead of publishing whatever was on the stack. This
+     * used to be an uninitialised `float soc;` whose value was written only on
+     * success, while the return code was discarded — a persistently failing
+     * process() therefore reported a stale, plausible-looking percentage
+     * forever, with nothing in the log to say so. */
+    float soc = (float)*batt_level;
+    float tte;
+    float ttf;
+    float delta;
+    int32_t chg_status;
+    int ret;
+
+    ret = npm_read_sensors(charger, &voltage, &current, &temp, &chg_status);
+    if (ret < 0)
+    {
+        printk("Error: Could not read from charger device\n");
+        return ret;
+    }
+
+    ret = nrf_fuel_gauge_ext_state_update(
+        vbus_connected ? NRF_FUEL_GAUGE_EXT_STATE_INFO_VBUS_CONNECTED
+                       : NRF_FUEL_GAUGE_EXT_STATE_INFO_VBUS_DISCONNECTED,
+        NULL);
+    if (ret < 0)
+    {
+        printk("Error: Could not inform of state\n");
+        return ret;
+    }
+
+    if (chg_status != chg_status_prev)
+    {
+        chg_status_prev = chg_status;
+
+        ret = charge_status_inform(chg_status);
+        if (ret < 0)
+        {
+            printk("Error: Could not inform of charge status\n");
+            return ret;
+        }
+    }
+
+    delta = (float)k_uptime_delta(&ref_time) / 1000.f;
+
+    current = -current; // Invert current sign for nrf_fuel_gauge lib
+
+    /* Process fuel gauge data. NCS 3.4 API: results returned via out-params
+     * (soc/tte/ttf) with an int status, not the previous by-value returns.
+     *
+     * The status is checked, not discarded: if the library rejects a sample —
+     * an out-of-range temperature is the usual reason, the model is only
+     * characterised over .temps = {5, 25, 45} degC — it leaves `soc` untouched,
+     * and a stuck percentage is otherwise completely silent. Report at WRN,
+     * rate-limited, and hold the previous reading. */
+    ret = nrf_fuel_gauge_process(voltage, current, temp, delta, &soc, NULL);
+    if (ret < 0)
+    {
+        static uint32_t fg_err_count;
+        if ((fg_err_count++ % 60u) == 0u)
+        {
+            LOG_WRN("Fuel gauge rejected sample (%d), SoC held at %u%% "
+                    "[V=%.3f I=%.3f T=%.2f dt=%.1f] — %u so far",
+                    ret, (unsigned)soc, (double)voltage, (double)current,
+                    (double)temp, (double)delta, fg_err_count);
+        }
+    }
+    (void)nrf_fuel_gauge_tte_get(&tte);
+    (void)nrf_fuel_gauge_ttf_get(&ttf);
+
+    /* Periodic trace so a field report of a frozen/implausible percentage can be
+     * diagnosed from a log instead of guessed at. ~every 5 min at the hw thread's
+     * 5 s cadence. */
+    {
+        static uint32_t fg_log_count;
+        if ((fg_log_count++ % 60u) == 0u)
+        {
+            LOG_INF("Batt V=%.3f I=%.3f T=%.2f SoC=%.1f%% TTE=%.0f TTF=%.0f chg=0x%02x",
+                    (double)voltage, (double)current, (double)temp, (double)soc,
+                    (double)tte, (double)ttf, chg_status);
+        }
+    }
+
+    // Update return values
+    *batt_level = (uint8_t)soc;
+    /* Mask, do NOT assign the raw register: bit 0 is BATTERYDETECTED and is set
+     * whenever a cell is present, so `*batt_charging = chg_status` was always
+     * true. That pinned the charging icon on AND — far worse — made the
+     * over-discharge guard in battery_evaluate() (`!charging && voltage <=
+     * HPI_BATTERY_SHUTDOWN_VOLTAGE`) unreachable, so the cell could be run below
+     * its floor with no ship-mode cutoff. */
+    *batt_charging = (chg_status & NPM1300_CHG_STATUS_CHARGING_MASK) != 0;
+    *batt_voltage = voltage; // Return the battery voltage
+
+    // Update internal state for external access
+    last_battery_level = *batt_level;
+    last_battery_voltage = *batt_voltage;
+
+    return 0;
+}
+
+bool battery_is_low(void)
+{
+    return low_battery_screen_active;
+}
+
+uint8_t battery_get_level(void)
+{
+    return last_battery_level;
+}
+
+float battery_get_voltage(void)
+{
+    return last_battery_voltage;
+}
+
+enum hpi_batt_state battery_evaluate(uint8_t soc, bool charging, float voltage)
+{
+    /* Over-discharge hard floor first: below the floor while not charging, we
+     * ship-mode regardless of the SoC estimate. Debounced so a transient sag
+     * under load (Li-ion voltage droops hard) can't power the device off. */
+    if (!charging && voltage <= HPI_BATTERY_SHUTDOWN_VOLTAGE)
+    {
+        if (++s_shutdown_streak >= HPI_BATTERY_DEBOUNCE_SAMPLES)
+        {
+            s_batt_state = HPI_BATT_SHUTDOWN;
+            return s_batt_state;
+        }
+    }
+    else
+    {
+        s_shutdown_streak = 0;
+    }
+
+    /* SoC-based low-battery warning with hysteresis. Recovery is condition-based
+     * (SoC rebound), NOT gated on charging - a load dropping off and the resting
+     * voltage/SoC recovering must dismiss the warning even without a charger. */
+    switch (s_batt_state)
+    {
+    case HPI_BATT_NORMAL:
+        if (soc <= HPI_BATTERY_LOW_SOC_PCT)
+        {
+            if (++s_low_streak >= HPI_BATTERY_DEBOUNCE_SAMPLES)
+            {
+                s_batt_state = HPI_BATT_LOW;
+                s_low_streak = 0;
+            }
+        }
+        else
+        {
+            s_low_streak = 0;
+        }
+        break;
+
+    case HPI_BATT_LOW:
+        if (soc >= HPI_BATTERY_RECOVER_SOC_PCT)
+        {
+            if (++s_recover_streak >= HPI_BATTERY_DEBOUNCE_SAMPLES)
+            {
+                s_batt_state = HPI_BATT_NORMAL;
+                s_recover_streak = 0;
+            }
+        }
+        else
+        {
+            s_recover_streak = 0;
+        }
+        break;
+
+    case HPI_BATT_SHUTDOWN:
+    default:
+        /* terminal - the device is powering off */
+        break;
+    }
+
+    return s_batt_state;
+}
+
+void battery_monitor_conditions(uint8_t sys_batt_level, bool sys_batt_charging, float sys_batt_voltage)
+{
+    // Update internal state
+    last_battery_level = sys_batt_level;
+    last_battery_voltage = sys_batt_voltage;
+
+    /* S3: this runs on hw_thread and MUST NOT touch LVGL. It only latches the
+     * battery state; the display thread owns the low-battery screen and shows /
+     * dismisses it from hw_is_low_battery() (see smf_display reconcile). The
+     * shutdown path stays here - hpi_hw_pmic_off() is not a UI call. */
+    switch (battery_evaluate(sys_batt_level, sys_batt_charging, sys_batt_voltage))
+    {
+    case HPI_BATT_SHUTDOWN:
+        LOG_ERR("Battery below floor (%.2f V) - shutting down", (double)sys_batt_voltage);
+        k_msleep(1000); // Give time for the log message to flush
+        hpi_hw_pmic_off();
+        break;
+
+    case HPI_BATT_LOW:
+        if (!low_battery_screen_active)
+        {
+            LOG_WRN("Low battery (SoC %u%%) - warning latched", sys_batt_level);
+            low_battery_screen_active = true;
+        }
+        break;
+
+    case HPI_BATT_NORMAL:
+    default:
+        if (low_battery_screen_active)
+        {
+            LOG_INF("Battery recovered (SoC %u%%) - clearing low battery warning", sys_batt_level);
+            low_battery_screen_active = false;
+        }
+        break;
+    }
+}

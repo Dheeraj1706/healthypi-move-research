@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+
+cmake_minimum_required(VERSION 3.20.0)
+
+macro(app_set_runner_args)
+  if(CONFIG_BOARD_HEALTHYPI_MOVE_NRF5340_CPUAPP)
+    # Use alternative QSPI configuration file 
+    board_runner_args(nrfjprog "--qspiini=${CMAKE_CURRENT_SOURCE_DIR}/qspi_w25.ini")
+  endif()
+endmacro()
+
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+
+project(healthypi_move)
+
+FILE(GLOB app_sources   src/*.c
+                        src/health/*.c
+                        src/images/*.c
+                        src/ui/*.c
+                        src/ui/components/*.c
+                        src/ui/images/*.c
+                        src/ui/fonts/*.c
+                        src/ui/fonts/lvgl/*.c
+                        src/ui/screens/*.c
+                        src/ui/screens/*.c
+                        src/ui/screens/*.c
+                        src/sm/*.c)
+
+# Synthetic data generator is TEST-ONLY; keep it out of the binary when disabled.
+if(NOT CONFIG_HPI_HS_SYNTH)
+  list(FILTER app_sources EXCLUDE REGEX ".*/src/health/hpi_hs_synth\\.c$")
+endif()
+
+# Same for the synthetic pre-3.0 storage tree (the migration test fixture).
+if(NOT CONFIG_HPI_STORAGE_LEGACY_SYNTH)
+  list(FILTER app_sources EXCLUDE REGEX ".*/src/hpi_storage_legacy_synth\\.c$")
+endif()
+
+# CONFIG_HPI_GSR_SCREEN=n promises "GSR source files are excluded" (app/Kconfig).
+# Until now nothing enforced it, so the =n build still compiled the screens and
+# only failed later, at link, on the runtime hooks. Exclude the two GSR-only
+# screens; move_ui.h supplies inline no-op stubs for their entry points.
+# NOTE: scr_stress_monitor.c is deliberately NOT in this list — the Stress/HRV
+# tile is fed by PPG R-R HRV out of the health store and has no GSR dependency.
+if(NOT CONFIG_HPI_GSR_SCREEN)
+  list(FILTER app_sources EXCLUDE REGEX ".*/src/ui/screens/scr_gsr_complete\\.c$")
+  list(FILTER app_sources EXCLUDE REGEX ".*/src/ui/screens/scr_eda_monitor\\.c$")
+endif()
+
+# JetBrains Mono was only used by the boot POST log; that screen now uses
+# Manrope (HPI_FONT_LABEL). Keep the .c on disk for regeneration history but
+# do not link it (~52 KB of source / multi-KB of glyph data).
+list(FILTER app_sources EXCLUDE REGEX ".*/src/ui/fonts/lvgl/jetbrains_mono_700_20\\.c$")
+
+target_sources(app PRIVATE ${app_sources})
+
+if(CONFIG_MAX32664_UPDATER)
+    FILE(GLOB max32664_updater_sources 
+         src/max32664_updater/max32664_updater.c)
+    target_sources(app PRIVATE ${max32664_updater_sources})
+    zephyr_library_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/max32664_updater)
+endif()
+
+zephyr_library_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/drivers)
+zephyr_library_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+zephyr_library_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+# NOTE: the M3-era -Wno-error=incompatible-pointer-types escape hatch is GONE.
+# It existed for exactly one thing: sm/smf_display.c stored the 1-arg
+# draw_scr_carousel in the 5-arg screen_func_table (8 entries). That is now
+# adapted by draw_scr_carousel_entry(), so the table is type-correct and GCC 14's
+# -Wincompatible-pointer-types is a hard error again for the whole app library --
+# which is what we want, since the flag was suppressing the diagnostic everywhere,
+# not just on those 8 entries. Do not re-add it to paper over a new mismatch.
+
+set(gen_dir ${ZEPHYR_BINARY_DIR}/include/generated/)
+
+# This places images in the external flash memory
+
+#zephyr_code_relocate(FILES lib/max32664_updater/max32664_updater.c LOCATION EXTFLASH_TEXT NOCOPY)
+#zephyr_code_relocate(FILES lib/max32664_updater/msbl/max32664c_30_13_31.c LOCATION EXTFLASH_RODATA NOCOPY)
+#zephyr_code_relocate(FILES lib/max32664_updater/msbl/max32664d_40_6_0.c LOCATION EXTFLASH_RODATA NOCOPY)
+
+#zephyr_code_relocate(LIBRARY subsys__mgmt__mcumgr__mgmt LOCATION EXTFLASH_TEXT NOCOPY)
+#zephyr_code_relocate(LIBRARY subsys__mgmt__mcumgr__transport LOCATION EXTFLASH_TEXT NOCOPY)
+#zephyr_code_relocate(LIBRARY subsys__mgmt__mcumgr__util LOCATION EXTFLASH_TEXT NOCOPY)
+#zephyr_code_relocate(LIBRARY subsys__mgmt__mcumgr__smp LOCATION EXTFLASH_TEXT NOCOPY)
+#zephyr_code_relocate(LIBRARY subsys__mgmt__mcumgr__grp__img_mgmt LOCATION EXTFLASH_TEXT NOCOPY)
+#zephyr_code_relocate(LIBRARY subsys__mgmt__mcumgr__grp__os_mgmt LOCATION EXTFLASH_TEXT NOCOPY)
+
+#zephyr_code_relocate(LIBRARY modules__cmsis-dsp LOCATION EXTFLASH_TEXT NOCOPY)

@@ -1,0 +1,84 @@
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
+
+*build_
+/app/build*
+/lib
+CMakeFiles/
+app/.DS_Store
+CMakeCache.txt
+.github/copilot-instructions.md
+app/src/add_headers.sh
+build
+app/src/ui/fonts/lv_font_conv/
+/temp-docs
+app/.DS_Store
+/temp_docs
+CLAUDE.md
+.DS_Store
+app/.DS_Store
+
+# Large font source archive (download separately if regenerating fonts)
+app/src/ui/fonts/ttf/Inter-4.0.zip
+docs/design_handoff_healthypi_move_v2/fonts/
+twister-out*/
+
+# Claude Code local scratch
+.claude/scratch/
+.claude/settings.local.json
+
+# Internal planning / release docs — kept in the tree, never published.
+# /internal/ is the canonical location for planning, design and scratch docs;
+# /docs/internal/ predates it and still holds the v3 release + DTS migration plans.
+/internal/
+/docs/internal/

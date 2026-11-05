@@ -1,0 +1,46 @@
+# Local SDKs, build output and recordings
+/tools/
+/tmp/
+/data/
+/output/
+**/build/
+**/.dart_tool/
+**/.gradle/
+**/__pycache__/
+**/.venv/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.csv
+*.apk
+*.aab
+*.elf
+*.hex
+*.map
+*.obj
+*.o
+*.exe
+*.zip
+/wire_test
+
+# Credentials and signing material must stay local
+**/keys/
+*.pem
+*.jks
+*.keystore
+*.p12
+*.pfx
+**/key.properties
+**/local.properties
+**/keystore.base64
+/app/android/akw-newkey
+.env
+.env.*
+
+# Editor and assistant state
+**/.idea/
+**/.claude/
+.DS_Store

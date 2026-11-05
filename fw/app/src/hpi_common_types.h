@@ -1,0 +1,312 @@
+/*
+ * HealthyPi Move
+ * 
+ * SPDX-License-Identifier: MIT
+ *
+ * Copyright (c) 2025 Protocentral Electronics
+ *
+ * Author: Ashwin Whitchurch, Protocentral Electronics
+ * Contact: ashwin@protocentral.com
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+
+/*
+HealthyPi specific common data types
+*/
+
+#pragma once
+
+#include <time.h>
+#include "hpi_research_wire.h"
+
+#define ECG_POINTS_PER_SAMPLE 16
+#define BIOZ_POINTS_PER_SAMPLE 8
+#define PPG_POINTS_PER_SAMPLE 8
+#define BPT_PPG_POINTS_PER_SAMPLE 32
+
+#define ECG_RECORD_BUFFER_SAMPLES 3840 // Full 30 seconds at 128 Hz (128*30) - 15.36KB total
+#define GSR_RECORD_BUFFER_SAMPLES 960 // Full 30 seconds at 32 Hz (32*30) - 3.8KB total
+#define BIOZ_MAX_SAMPLES 64    // safe for 32 Hz, 1–2 s batch
+
+enum hpi_ppg_status 
+{
+    HPI_PPG_SCD_STATUS_UNKNOWN,
+    HPI_PPG_SCD_OFF_SKIN,
+    HPI_PPG_SCD_ON_OBJ,
+    HPI_PPG_SCD_ON_SKIN,
+};
+
+struct hpi_ecg_bioz_sensor_data_t
+{
+    struct hpr_stamp research_stamp; /* producer metadata; not legacy wire format */
+    int32_t ecg_samples[ECG_POINTS_PER_SAMPLE];
+    int32_t bioz_sample[BIOZ_POINTS_PER_SAMPLE];
+
+    uint8_t ecg_num_samples;
+    uint8_t bioz_num_samples;
+
+    uint16_t rtor;
+    uint16_t hr;
+    uint8_t ecg_lead_off;
+    uint8_t bioz_lead_off;
+    bool _bioZSkipSample;
+
+    uint8_t rrint;
+};
+
+struct hpi_gsr_sensor_data_t
+{
+    int32_t bioz_samples[BIOZ_POINTS_PER_SAMPLE];  // Conductance in µS × 100 (fixed-point from driver)
+    uint8_t bioz_num_samples;                      // Number of valid samples in this batch
+    uint8_t bioz_lead_off;                         // Lead-off detection status
+};
+
+/*
+ * Lightweight BioZ-only sample used for internal producer/consumer queues
+ * when ECG decoding is not required. Keeps the copy footprint small.
+ *
+ * Note: bioz_samples contains conductance values in µS × 100 (fixed-point).
+ * The MAX30001 driver performs ADC-to-conductance conversion internally.
+ */
+struct hpi_bioz_sample_t
+{
+    struct hpr_stamp research_stamp; /* producer metadata; not legacy wire format */
+    int32_t bioz_samples[BIOZ_POINTS_PER_SAMPLE];  // Conductance in µS × 100 (fixed-point from driver)
+    uint8_t bioz_num_samples;
+    uint8_t bioz_lead_off;
+    int64_t timestamp;
+};
+
+struct hpi_ppg_wr_data_t
+{
+    struct hpr_stamp research_stamp; /* producer metadata; not legacy wire format */
+    uint32_t raw_red[PPG_POINTS_PER_SAMPLE];
+    uint32_t raw_ir[PPG_POINTS_PER_SAMPLE];
+    uint32_t raw_green[PPG_POINTS_PER_SAMPLE];
+
+    uint8_t ppg_num_samples;
+
+    uint16_t hr;
+    uint8_t hr_confidence;
+
+    uint8_t spo2;
+    uint8_t spo2_confidence;
+    uint8_t spo2_valid_percent_complete;
+	uint8_t spo2_state;
+	uint8_t spo2_excessive_motion;
+	uint8_t spo2_low_pi;
+
+    uint8_t bp_sys;
+    uint8_t bp_dia;
+    uint8_t bpt_status;
+    uint8_t bpt_progress;
+
+    uint16_t rtor;
+    uint8_t rtor_confidence;
+    
+    uint8_t scd_state;
+};
+
+struct hpi_ppg_fi_data_t
+{
+    struct hpr_stamp research_stamp; /* producer metadata; not legacy wire format */
+    uint32_t raw_red[BPT_PPG_POINTS_PER_SAMPLE];
+    uint32_t raw_ir[BPT_PPG_POINTS_PER_SAMPLE];
+
+    uint8_t ppg_num_samples;
+
+    uint16_t hr;
+    uint8_t hr_confidence;
+
+    uint8_t spo2;
+    uint8_t spo2_confidence;
+    uint8_t spo2_valid_percent_complete;
+    uint8_t spo2_state;
+
+    uint8_t bp_sys;
+    uint8_t bp_dia;
+    uint8_t bpt_status;
+    uint8_t bpt_progress;
+
+    uint16_t rtor;
+    uint8_t rtor_confidence;
+    
+    uint8_t scd_state;
+};
+
+/*struct hpi_ppg_fi_bpt_cal_t
+{
+    uint32_t 
+}*/
+
+struct hpi_computed_hrv_t
+{
+    int32_t hrv_max;
+    int32_t hrv_min;
+    float mean;
+    float sdnn;
+    float pnn;
+    float rmssd;
+    bool hrv_ready_flag;
+};
+
+struct hpi_hr_t
+{
+    int64_t timestamp;
+    uint16_t hr;
+    bool hr_ready_flag;
+};
+
+struct hpi_steps_t
+{
+    int64_t timestamp;
+    uint32_t steps; /* today's step total; widened from uint16_t so daily counts >65535 don't wrap */
+};
+
+struct hpi_temp_t
+{
+    int64_t timestamp;
+    double temp_f;
+    double temp_c;
+};
+
+struct hpi_bpt_t
+{
+    int64_t timestamp;
+
+    uint16_t sys;
+    uint16_t dia;
+    uint16_t hr;
+
+    uint8_t spo2;
+    uint8_t spo2_conf;
+    uint8_t spo2_report;
+
+    uint8_t status;
+    uint8_t progress;
+};
+
+struct hpi_spo2_point_t
+{
+    int64_t timestamp;
+    uint16_t spo2;
+};
+
+struct hpi_batt_status_t
+{
+    uint8_t batt_level;
+    bool batt_charging;
+};
+
+enum hpi_ecg_status
+{
+    HPI_ECG_STATUS_IDLE = 0x00,
+    HPI_ECG_STATUS_STREAMING,
+    HPI_ECG_STATUS_COMPLETE,
+    HPI_ECG_STATUS_ERROR,
+};
+
+enum hpi_ble_event
+{
+    HPI_BLE_EVENT_PAIR_REQUEST =0x01,
+    HPI_BLE_EVENT_PAIR_SUCCESS,
+    HPI_BLE_EVENT_PAIR_FAILED,
+    HPI_BLE_EVENT_PAIR_CANCELLED,
+};
+
+enum hpi_bpt_status
+{
+    HPI_BPT_STATUS_IDLE = 0x00,
+    HPI_BPT_STATUS_MEASURING,
+    HPI_BPT_STATUS_COMPLETE,
+    HPI_BPT_STATUS_ERROR,
+    HPI_BPT_STATUS_CANCELLED,
+    HPI_BPT_STATUS_TIMEOUT,
+};
+
+struct hpi_ecg_status_t
+{
+    int64_t ts_complete;
+    uint8_t status;
+    uint16_t progress_timer;
+    uint8_t hr;
+};
+
+struct hpi_ecg_lead_on_off_t
+{
+    bool lead_on_off;
+};
+
+enum spo2_meas_state
+{
+    SPO2_MEAS_LED_ADJ = 0x00,
+    SPO2_MEAS_COMPUTATION,
+    SPO2_MEAS_SUCCESS,
+    SPO2_MEAS_TIMEOUT,
+    SPO2_MEAS_UNK,
+};
+
+enum spo2_source
+{
+    SPO2_SOURCE_PPG_WR = 0x00,
+    SPO2_SOURCE_PPG_FI,
+};
+
+struct hpi_version_desc_t
+{
+    uint8_t major;
+    uint8_t minor;
+    uint8_t patch;
+};
+
+/* hpi_last_update_time_t removed with the last-value store — the health store
+ * (app/src/health/) owns per-metric last values now. */
+
+struct hpi_gsr_stress_index_t
+{
+    uint8_t stress_level;              // 0-100 stress score
+    uint16_t tonic_level_x100;         // Baseline GSR (SCL) in μS * 100
+    uint16_t phasic_amplitude_x100;    // Current phasic response (SCR) in μS * 100
+    uint8_t peaks_per_minute;          // Number of SCR peaks detected per minute
+    uint16_t mean_peak_amplitude_x100; // Average peak amplitude in μS * 100
+    int64_t last_peak_timestamp;       // Timestamp of last detected peak
+    bool stress_data_ready;            // Flag indicating valid stress data
+};
+
+// Live GSR measurement status (mirrors ECG status concept for timers)
+enum hpi_gsr_status
+{
+    HPI_GSR_STATUS_IDLE = 0x00,
+    HPI_GSR_STATUS_STREAMING,   // capture running; `contact` gives the sub-phase
+    HPI_GSR_STATUS_COMPLETE,
+};
+
+struct hpi_gsr_status_t
+{
+    uint16_t elapsed_s;    // Seconds since measurement start
+    uint16_t remaining_s;  // Seconds remaining to target duration (0 when complete)
+    uint16_t total_s;      // Total target duration (e.g. 60)
+    bool active;           // Measurement currently active
+    bool contact;          // Skin contact present; the countdown only runs when true
+    uint8_t status;        // enum hpi_gsr_status - drives the inline EDA monitor
+};
+
+

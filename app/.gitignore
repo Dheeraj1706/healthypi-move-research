@@ -1,0 +1,73 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+
+# Build output, at any depth: /build, android/build, ios/build, packages/*/build, ...
+build/
+.gradle/
+**/Pods/
+**/Flutter/ephemeral/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Project-specific
+/android/app/local.properties
+.github/copilot-instructions.md
+keystore.base64
+/healthypi_trends.db
+x
+/temp_docs
+# Design handoff zip is redundant with the extracted docs/design_handoff_* dir.
+docs/*.zip
+
+# Library packages resolve fresh; only apps pin a lockfile. `**` so nested
+# packages are covered too — an example/ is its own package with its own
+# throwaway resolution, and the single-level glob missed it.
+packages/**/pubspec.lock
+/flutter_01.png
+/flutter_02.png
+CLAUDE.md
+/tmp_local
+
+# Internal planning docs (roadmap, decisions log, firmware handoffs). Kept out
+# of the public repo deliberately; a local copy may live here for reference.
+docs/internal/

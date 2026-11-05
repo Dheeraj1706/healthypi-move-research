@@ -1,0 +1,33 @@
+{
+  "application_version": "3.1.1-ppg",
+  "mcuboot_version": "3.1.1+0",
+  "ncs": "3.4.0",
+  "board": "healthypi_move/nrf5340/cpuapp",
+  "base_commit": "874f134",
+  "target_build": "passed",
+  "python_protocol_tests": 9,
+  "host_c_codec_test": "passed with -Wall -Wextra -Werror",
+  "app_and_radio_mcuboot_signature_checks": "passed with configured repository key",
+  "ota_crc_and_manifest_checks": "passed",
+  "source_hash_and_patch_checks": "passed",
+  "app_signed_bytes": 784924,
+  "app_static_ram_used_bytes": 446368,
+  "app_ram_region_bytes": 450560,
+  "hardware_tested": false,
+  "installed_watch_signing_key_compatibility_verified": false,
+  "new_signal_ids": {
+    "9": "ppg_wrist_red",
+    "10": "ppg_wrist_ir",
+    "11": "ppg_finger_red"
+  },
+  "files": {
+    "HealthyPi_Move_3.1.1_PPG_OTA.zip": {
+      "bytes": 937943,
+      "sha256": "a3c5fe01c202869fc357a19c03a95bbdc7320fe79fb01f09d37283fb51486c55"
+    },
+    "HealthyPi_Move_Extra_PPG_SOURCE_ONLY.zip": {
+      "bytes": 115634,
+      "sha256": "689ce6e478ff9b0710588c538c89f8cf8bc8412b11a6ca6d235b57c6d1e80c73"
+    }
+  }
+}

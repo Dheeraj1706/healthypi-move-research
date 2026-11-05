@@ -1,0 +1,1861 @@
+--- a/analysis_options.yaml
++++ b/analysis_options.yaml
+@@ -7,6 +7,15 @@
+ 
+ # The following line activates a set of recommended lints for Flutter apps,
+ # packages, and plugins designed to encourage good coding practices.
++analyzer:
++  exclude:
++    - build/**
++    - android/**
++    - ios/**
++    - web/**
++    - windows/**
++    - macos/**
++    - linux/**
+ include: package:flutter_lints/flutter.yaml
+ 
+ # No analyzer excludes: the HPI_HS protocol client used to live in-tree at
+--- a/android/app/build.gradle.kts
++++ b/android/app/build.gradle.kts
+@@ -33,7 +33,7 @@
+ 
+     defaultConfig {
+         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+-        applicationId = "com.protocentral.move"
++        applicationId = "com.protocentral.move.research"
+         // You can update the following values to match your application needs.
+         // For more information, see: https://flutter.dev/to/review-gradle-config.
+         minSdk = flutter.minSdkVersion
+--- a/android/app/src/main/AndroidManifest.xml
++++ b/android/app/src/main/AndroidManifest.xml
+@@ -33,7 +33,7 @@
+ 
+ 
+     <application
+-        android:label="Healthypi Move"
++        android:label="HealthyPi Move PPG"
+         android:name="${applicationName}"
+         android:icon="@mipmap/launcher_icon"
+         android:requestLegacyExternalStorage="true">
+--- /dev/null
++++ b/docs/RESEARCH_PPG_LIVE.md
+@@ -0,0 +1,59 @@
++# HealthyPi Move PPG research app
++
++Custom Android app version 3.0.9+97. Application ID:
++`com.protocentral.move.research`. Android launcher name: **HealthyPi Move PPG**.
++It installs separately from the official app and keeps its own paired-device
++settings and local history. Pair the watch in this app after installation.
++
++## Live channels
++
++- ECG and GSR retain their original live characteristics.
++- Wrist green and finger IR work on the original BLE endpoints when the research
++  service is absent.
++- With the custom **3.1.1-ppg firmware**, all five PPG channels use the encrypted
++  research data service: wrist green (3), wrist red (9), wrist IR (10), finger IR
++  (4), finger red (11). The service is detected from GATT discovery, not inferred
++  from a version string. Unknown future signal IDs are ignored.
++
++The Live tab has a horizontally scrollable channel selector. Enable **Compare**
++and choose the second channel to display two graphs on either a phone or tablet.
++The graphs have eight seconds of nominal sample capacity, raw sample counts and
++an adaptive PPG scale. They show sample totals, the latest raw value and inferred
++missing samples after a device-counter baseline. Device indices are tracked
++separately per signal; duplicates/out-of-order packets are ignored and a gap or
++boot-ID change clears the previous trace rather than joining across missing data.
++Counters do not prove lossless capture or exact synchronization between sensors.
++
++One research notification subscription serves both PPG graphs. Leaving Live
++stops its subscriptions. SMP recording/firmware transfers pause Live and release
++its notifications, with resubscription on return. This is display functionality:
++it does not add live recording/export or send remote sensor Start/Stop commands.
++
++## Use on a phone
++
++1. Install the provided APK and open **HealthyPi Move PPG**.
++2. Disconnect any other phone/laptop application holding the watch connection.
++3. Scan/pair the watch and grant the requested Bluetooth permissions. Accept
++   pairing/passkey prompts on the phone and watch.
++4. Open **Live**, swipe the signal selector and choose a channel. Tap the refresh
++   button if pairing was rejected or a notification subscription failed.
++5. Start the relevant measurement using the watch controls. Wrist red/IR depend
++   on wrist SpO2 mode; finger channels need an active finger measurement and
++   contact. Observe the watch's existing measurement restrictions. This app does
++   not make all five channels run continuously or simultaneously.
++
++A missing custom service gets a firmware requirement message for red/extra IR
++channels. Zero/flat values are not replaced with synthetic waveforms. Verify
++actual optical response and signal quality on hardware.
++
++## Checks
++
++Changed Dart files pass analysis. The targeted suite passes 26 tests covering
++the wire decoder, uint32 values, payload slicing, malformed packets, per-channel
++continuity, subscription sharing, selection races, retries, old-firmware fallback,
++hidden-tab cleanup, phone/tablet layout, SMP locking and existing signal scaling.
++Android APK build and signature details are recorded in the delivered build
++report. No physical phone/watch BLE test has been performed.
++
++The research APK uses the project's local Android signing fallback for personal
++installation; it is not a Play Store release and cannot update the official app.
+--- /dev/null
++++ b/lib/ble/research_packet.dart
+@@ -0,0 +1,76 @@
++import 'dart:typed_data';
++
++const researchService = 'a17e0000-4d52-4f56-9100-524553454152';
++const researchData = 'a17e0003-4d52-4f56-9100-524553454152';
++
++/// HPR1 wire contract, shared with fw/tools/research_protocol.py.
++/// Device uptime is an estimate, not UTC or an exact acquisition timestamp.
++class ResearchPacket {
++  const ResearchPacket(
++    this.signalId,
++    this.bootId,
++    this.firstIndex,
++    this.estimatedUptimeMs,
++    this.values,
++  );
++
++  final int signalId, bootId, firstIndex, estimatedUptimeMs;
++  final List<double> values;
++
++  /// Unknown signal IDs are ignored, allowing future additive extensions.
++  static ResearchPacket? decode(Uint8List bytes) {
++    if (bytes.length < 20) {
++      throw const FormatException('Research packet too short');
++    }
++    final data = ByteData.sublistView(bytes);
++    final version = data.getUint8(0), signal = data.getUint8(1);
++    final flags = data.getUint8(2), count = data.getUint8(3);
++    if (version != 1 || count == 0 || bytes.length != 16 + count * 4) {
++      throw const FormatException('Invalid research packet header or length');
++    }
++    if (signal < 1 || signal > 11) return null;
++    final signed = signal == 1 || signal == 2 || signal == 6;
++    if ((flags & ~3) != 0 ||
++        (flags & 1) == 0 ||
++        ((flags & 2) != 0) != signed ||
++        (signal >= 5 && signal <= 8 && count != 1)) {
++      throw const FormatException(
++        'Invalid research packet flags or sample count',
++      );
++    }
++    return ResearchPacket(
++      signal,
++      data.getUint32(4, Endian.little),
++      data.getUint32(8, Endian.little),
++      data.getUint32(12, Endian.little),
++      [
++        for (int i = 0; i < count; i++)
++          (signed
++                  ? data.getInt32(16 + i * 4, Endian.little)
++                  : data.getUint32(16 + i * 4, Endian.little))
++              .toDouble(),
++      ],
++    );
++  }
++}
++
++class ResearchContinuity {
++  final _next = <int, (int, int)>{};
++
++  /// Null means duplicate/out-of-order. Missing counts only follow a baseline.
++  ({int missing, bool reset})? observe(ResearchPacket packet) {
++    final previous = _next[packet.signalId];
++    int missing = 0;
++    final reset = previous != null && previous.$1 != packet.bootId;
++    if (previous != null && !reset) {
++      final delta = (packet.firstIndex - previous.$2) & 0xffffffff;
++      if (delta >= 0x80000000) return null;
++      missing = delta;
++    }
++    _next[packet.signalId] = (
++      packet.bootId,
++      (packet.firstIndex + packet.values.length) & 0xffffffff,
++    );
++    return (missing: missing, reset: reset);
++  }
++}
+--- /dev/null
++++ b/lib/models/live_signal.dart
+@@ -0,0 +1,87 @@
++import 'dart:typed_data';
++
++import 'package:flutter/material.dart';
++
++import '../globals.dart';
++import '../theme/hpi_colors.dart';
++
++enum LiveSignal { ecg, wristGreen, wristRed, wristIr, fingerIr, fingerRed, gsr }
++
++extension LiveSignalInfo on LiveSignal {
++  String get label => switch (this) {
++    LiveSignal.ecg => 'ECG',
++    LiveSignal.wristGreen => 'Wrist green',
++    LiveSignal.wristRed => 'Wrist red',
++    LiveSignal.wristIr => 'Wrist IR',
++    LiveSignal.fingerIr => 'Finger IR',
++    LiveSignal.fingerRed => 'Finger red',
++    LiveSignal.gsr => 'GSR',
++  };
++
++  int get researchId => switch (this) {
++    LiveSignal.ecg => 1,
++    LiveSignal.gsr => 2,
++    LiveSignal.wristGreen => 3,
++    LiveSignal.fingerIr => 4,
++    LiveSignal.wristRed => 9,
++    LiveSignal.wristIr => 10,
++    LiveSignal.fingerRed => 11,
++  };
++
++  int get rate => switch (this) {
++    LiveSignal.ecg => 128,
++    LiveSignal.gsr => 32,
++    LiveSignal.fingerIr || LiveSignal.fingerRed => 100,
++    _ => 25,
++  };
++
++  bool get isPpg => this != LiveSignal.ecg && this != LiveSignal.gsr;
++  bool get researchRequired =>
++      this == LiveSignal.wristRed ||
++      this == LiveSignal.wristIr ||
++      this == LiveSignal.fingerRed;
++  bool get isFinger =>
++      this == LiveSignal.fingerIr || this == LiveSignal.fingerRed;
++  Color get color => switch (this) {
++    LiveSignal.ecg => HpiColors.hr,
++    LiveSignal.gsr => HpiColors.eda,
++    LiveSignal.wristGreen => HpiColors.steps,
++    LiveSignal.wristRed || LiveSignal.fingerRed => HpiColors.bpSys,
++    LiveSignal.wristIr => HpiColors.stress,
++    LiveSignal.fingerIr => HpiColors.spo2,
++  };
++
++  String get legacyService =>
++      isPpg ? hPi4Global.UUID_SERV_PPG : hPi4Global.UUID_ECG_SERVICE;
++  String get legacyCharacteristic => switch (this) {
++    LiveSignal.ecg => hPi4Global.UUID_ECG_CHAR,
++    LiveSignal.gsr => hPi4Global.UUID_GSR_CHAR,
++    LiveSignal.wristGreen => hPi4Global.UUID_CHAR_PPG,
++    LiveSignal.fingerIr => 'cd5ca86f-4448-7db8-ae4c-d1da8cba36d0',
++    _ => throw StateError('$label needs the research service'),
++  };
++
++  List<double> decodeLegacy(Uint8List bytes) {
++    if (bytes.isEmpty || bytes.length % 4 != 0) {
++      throw const FormatException('Invalid waveform payload length');
++    }
++    final data = ByteData.sublistView(bytes);
++    return [
++      for (int offset = 0; offset < bytes.length; offset += 4)
++        (isPpg
++                ? data.getUint32(offset, Endian.little)
++                : data.getInt32(offset, Endian.little))
++            .toDouble(),
++    ];
++  }
++
++  String get waitingHint => switch (this) {
++    LiveSignal.ecg => 'Start ECG on the watch and touch the electrodes.',
++    LiveSignal.gsr => 'Start an EDA / GSR measurement on the watch.',
++    LiveSignal.fingerIr || LiveSignal.fingerRed =>
++      'Start a finger measurement on the watch and keep your finger in contact.',
++    LiveSignal.wristRed || LiveSignal.wristIr =>
++      'Start wrist SpO₂ on the watch. Red / IR availability depends on its measurement mode.',
++    LiveSignal.wristGreen => 'Wear the watch snugly and wait for wrist PPG.',
++  };
++}
+--- a/lib/screens/scr_live.dart
++++ b/lib/screens/scr_live.dart
+@@ -2,345 +2,315 @@
+ // SPDX-License-Identifier: MIT
+ 
+ import 'dart:async';
+-import 'dart:typed_data';
+-
+ import 'package:flutter/material.dart';
+ import 'package:material_symbols_icons/symbols.dart';
+ 
+-import '../globals.dart';
+ import '../models/device_info.dart';
++import '../models/live_signal.dart';
++import '../ble/research_packet.dart';
+ import '../theme/hpi_colors.dart';
+ import '../theme/hpi_text.dart';
+-import '../ui/adaptive/breakpoints.dart';
+ import '../ui/charts/hpi_sweep_waveform.dart';
+ import '../ui/components/hpi_components.dart';
+ import '../utils/connection_manager.dart';
+ import '../utils/device_manager.dart';
+-
+-/// Live signals (handoff 1f; 4b dual-signal on tablets).
+-///
+-/// Streams the selected signal over the custom GATT characteristics via
+-/// [ConnectionManager] — the same primitives the legacy live screen uses
+-/// (subscribe + host-endian Int32/Uint32 parse) — and renders it with the
+-/// monitor-style sweep. On expanded widths two channels stack on a shared
+-/// timebase (4b). Stat values that need derivation the app doesn't do yet
+-/// (RR interval, leads-on) are shown as "—" rather than invented.
++import '../utils/live_stream_controller.dart';
++
+ class ScrLive extends StatefulWidget {
+-  const ScrLive({super.key});
+-
++  const ScrLive({
++    super.key,
++    this.initialDevice,
++    this.transport,
++    this.active = true,
++  });
++  final bool active;
++  final DeviceInfo? initialDevice;
++  final LiveTransport? transport;
+   @override
+   State<ScrLive> createState() => _ScrLiveState();
+ }
+ 
+-/// A streamable signal: its GATT route, sample decoding, and identity color.
+-enum LiveSignal { ecg, ppg, gsr }
+-
+-extension on LiveSignal {
+-  String get label => switch (this) {
+-        LiveSignal.ecg => 'ECG',
+-        LiveSignal.ppg => 'PPG',
+-        LiveSignal.gsr => 'GSR',
+-      };
+-
+-  Color get color => switch (this) {
+-        LiveSignal.ecg => HpiColors.hr,
+-        LiveSignal.ppg => HpiColors.spo2,
+-        LiveSignal.gsr => HpiColors.eda,
+-      };
+-
+-  String get service => switch (this) {
+-        LiveSignal.ecg => hPi4Global.UUID_ECG_SERVICE,
+-        LiveSignal.ppg => hPi4Global.UUID_SERV_PPG,
+-        LiveSignal.gsr => hPi4Global.UUID_ECG_SERVICE,
+-      };
+-
+-  String get characteristic => switch (this) {
+-        LiveSignal.ecg => hPi4Global.UUID_ECG_CHAR,
+-        LiveSignal.ppg => hPi4Global.UUID_CHAR_PPG,
+-        LiveSignal.gsr => hPi4Global.UUID_GSR_CHAR,
+-      };
+-
+-  String get caption => switch (this) {
+-        LiveSignal.ecg => 'LEAD I · 128 SPS',
+-        LiveSignal.ppg => 'PPG · 25 SPS',
+-        LiveSignal.gsr => 'GSR · 32 SPS',
+-      };
+-
+-  /// The watch only produces this signal during an on-device spot check.
+-  ///
+-  /// ECG and GSR share the MAX30001 front end, and the firmware only queues its
+-  /// samples while `get_ecg_active() || get_gsr_active()` — both set by the
+-  /// Start button on the watch's own screen. Wrist PPG, by contrast, runs
+-  /// continuously. Subscribing is therefore not enough for ECG/GSR, and an idle
+-  /// trace is normal rather than a fault.
+-  bool get watchGated => switch (this) {
+-        LiveSignal.ecg => true,
+-        LiveSignal.gsr => true,
+-        LiveSignal.ppg => false,
+-      };
+-
+-  /// Decode a notification payload into samples. Copy into a fresh, offset-0
+-  /// buffer first: universal_ble hands back views into a larger buffer, so
+-  /// reinterpreting `value.buffer` directly would be misaligned.
+-  List<double> decode(Uint8List value) {
+-    final bytes = Uint8List.fromList(value);
+-    return switch (this) {
+-      LiveSignal.ecg =>
+-        bytes.buffer.asInt32List().map((e) => e.toDouble()).toList(),
+-      LiveSignal.ppg =>
+-        bytes.buffer.asUint32List().map((e) => e.toDouble()).toList(),
+-      LiveSignal.gsr =>
+-        bytes.buffer.asInt32List().map((e) => e.toDouble()).toList(),
+-    };
+-  }
+-}
+-
+ class _ScrLiveState extends State<ScrLive> {
+   final _cm = ConnectionManager.instance;
+-
+   DeviceInfo? _device;
++  LiveStreamController? _feed;
+   bool _resolving = true;
+-  String? _error;
+-
+-  LiveSignal _primary = LiveSignal.ecg;
+-
+-  /// Second channel, shown only on expanded layouts (4b).
+-  LiveSignal? _secondary;
+-
++  bool _wasConnected = false;
++  bool _wasSmpBusy = false;
++  bool _compare = false;
++  String? _connectionError;
++  LiveSignal _primary = LiveSignal.wristGreen;
++  LiveSignal _secondary = LiveSignal.wristRed;
+   final _buffers = <LiveSignal, SweepBuffer>{};
+-  final _subs = <LiveSignal, StreamSubscription<Uint8List>>{};
+-
+-  /// When each signal last delivered a sample, so the UI can distinguish
+-  /// "subscribed and waiting" from "streaming".
+   final _lastSample = <LiveSignal, DateTime>{};
+-
+-  /// Drives the "waiting for data" hint without rebuilding on every packet.
+-  Timer? _idleTicker;
++  final _latest = <LiveSignal, double>{};
++  Timer? _ticker;
++
++  bool get _connected =>
++      widget.transport?.connected ??
++      (_cm.isConnected && _cm.deviceId == _device?.macAddress);
++  Set<LiveSignal> get _selected => {_primary, if (_compare) _secondary};
+ 
+   @override
+   void initState() {
+     super.initState();
+     _cm.addListener(_onLink);
+-    // Kept alive in the shell's IndexedStack — re-resolve when pairing changes.
+     DeviceManager.pairingRevision.addListener(_init);
+-    // Cheap repaint so "waiting for the watch" appears without coupling the
+-    // hint to packet arrival (which by definition isn't happening).
+-    _idleTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+-      if (mounted && _cm.isConnected) setState(() {});
++    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
++      if (mounted && widget.active && _connected) setState(() {});
+     });
+     _init();
++  }
++
++  @override
++  void didUpdateWidget(covariant ScrLive oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (oldWidget.active != widget.active) {
++      WidgetsBinding.instance.addPostFrameCallback((_) {
++        if (mounted) _restart();
++      });
++    }
+   }
+ 
+   @override
+   void dispose() {
+     _cm.removeListener(_onLink);
+     DeviceManager.pairingRevision.removeListener(_init);
+-    _idleTicker?.cancel();
+-    for (final s in _subs.values) {
+-      s.cancel();
+-    }
+-    for (final b in _buffers.values) {
+-      b.dispose();
+-    }
+-    _subs.clear();
+-    _publishStreaming();
+-    // Leave the link itself alone — ConnectionManager owns it and other flows
+-    // (sync, DFU) may still need it.
+-    unawaited(_unsubscribeAll());
++    _ticker?.cancel();
++    _feed?.removeListener(_onFeed);
++    _feed?.dispose();
++    _cm.setStreaming(false);
++    for (final buffer in _buffers.values) {
++      buffer.dispose();
++    }
+     super.dispose();
+   }
+ 
+-  /// Tell [ConnectionManager] whether the streaming half of the radio is in
+-  /// use, so an automatic sync doesn't start SMP traffic underneath a live
+-  /// chart. Derived from the subscription set rather than toggled per call, so
+-  /// a double unsubscribe can't leave it stuck on.
+-  void _publishStreaming() => _cm.setStreaming(_subs.isNotEmpty);
++  SweepBuffer _buffer(LiveSignal signal) => _buffers.putIfAbsent(
++    signal,
++    () => SweepBuffer(
++      capacity: signal.rate * 8,
++      gap: signal.rate ~/ 8,
++      robustScale: signal.isPpg,
++    ),
++  );
++
++  void _onFeed() {
++    if (!mounted) return;
++    _cm.setStreaming(_feed?.isStreaming ?? false);
++    setState(() {});
++  }
+ 
+   void _onLink() {
+     if (!mounted) return;
++    // Streaming/SMP notifications also notify ConnectionManager listeners.
++    // Only a real link transition should reconfigure subscriptions.
++    final connected = _connected;
++    if (connected != _wasConnected || _cm.isSmpBusy != _wasSmpBusy) {
++      _wasConnected = connected;
++      _wasSmpBusy = _cm.isSmpBusy;
++      _restart();
++    }
+     setState(() {});
+-    if (_cm.isConnected) {
+-      // The link just came up. This used to only ever *tear down* on
+-      // disconnect, never start on connect — so opening Live before the link
+-      // settled, or any reconnect, left the default signal (ECG) permanently
+-      // unsubscribed while the header still read CONNECTED.
+-      _startAll();
+-    } else {
+-      for (final s in _subs.values) {
+-        s.cancel();
+-      }
+-      _subs.clear();
+-      _lastSample.clear();
+-      _publishStreaming();
+-    }
+   }
+ 
+   Future<void> _init() async {
+-    final device = await DeviceManager.getPairedDevice();
++    final device =
++        widget.initialDevice ?? await DeviceManager.getPairedDevice();
+     if (!mounted) return;
++    if (_device?.macAddress != device?.macAddress || _feed == null) {
++      _feed?.removeListener(_onFeed);
++      _feed?.dispose();
++      _feed =
++          device == null
++              ? null
++              : LiveStreamController(
++                widget.transport ?? ConnectedLiveTransport(device.macAddress),
++                onSamples: (signal, values, breakBefore) {
++                  if (!mounted || values.isEmpty) return;
++                  final buffer = _buffer(signal);
++                  final last = _lastSample[signal];
++                  if (breakBefore ||
++                      (last != null &&
++                          DateTime.now().difference(last) >
++                              const Duration(seconds: 3))) {
++                    buffer.clear();
++                  }
++                  _lastSample[signal] = DateTime.now();
++                  _latest[signal] = values.last;
++                  buffer.addAll(values);
++                },
++              );
++      _feed?.addListener(_onFeed);
++    }
+     setState(() {
+       _device = device;
+       _resolving = false;
+     });
+-    if (device != null && _cm.isConnected) _startAll();
++    _wasConnected = _connected;
++    _restart();
++  }
++
++  void _restart() {
++    _lastSample.clear();
++    _latest.clear();
++    for (final buffer in _buffers.values) {
++      buffer.clear();
++    }
++    unawaited(_feed?.select(!widget.active || _cm.isSmpBusy ? {} : _selected));
+   }
+ 
+   Future<void> _connect() async {
+     final device = _device;
+     if (device == null) return;
+     setState(() {
+-      _error = null;
+       _resolving = true;
++      _connectionError = null;
+     });
+     try {
+       await _cm.connect(device.macAddress, name: device.displayName);
+-      _startAll();
+-    } catch (e) {
+-      if (mounted) setState(() => _error = '$e');
++    } catch (error) {
++      if (mounted) setState(() => _connectionError = '$error');
+     } finally {
+       if (mounted) setState(() => _resolving = false);
+     }
+   }
+ 
+-  void _startAll() {
+-    _start(_primary);
+-    final s = _secondary;
+-    if (s != null) _start(s);
+-  }
+-
+-  void _start(LiveSignal signal) {
+-    if (!_cm.isConnected || _subs.containsKey(signal)) return;
+-    final buffer = _buffers.putIfAbsent(signal, () => SweepBuffer());
+-    try {
+-      _subs[signal] = _cm
+-          .subscribe(
+-        signal.service,
+-        signal.characteristic,
+-        // A failed notify-enable was previously swallowed into a debugPrint,
+-        // leaving a connected-looking screen that could never receive a byte.
+-        onSubscribeError: (e) {
+-          if (mounted) {
+-            setState(() => _error = 'Could not start ${signal.label}: $e');
+-          }
+-        },
+-      )
+-          .listen(
+-        (value) {
+-          _lastSample[signal] = DateTime.now();
+-          buffer.addAll(signal.decode(value));
+-        },
+-        onError: (Object e) => debugPrint('live ${signal.label}: $e'),
+-        cancelOnError: true,
+-      );
+-      _publishStreaming();
+-    } catch (e) {
+-      if (mounted) setState(() => _error = '$e');
+-    }
+-  }
+-
+-  /// Subscribed, but the watch has not sent this signal for a while.
+-  ///
+-  /// ECG and GSR are **spot checks**: the firmware only queues samples while a
+-  /// measurement is running on the watch (`get_ecg_active() || get_gsr_active()`
+-  /// gates `q_ecg_sample`), and ECG additionally needs leads on. So an idle
+-  /// grid here is the normal resting state, not a fault — say so instead of
+-  /// showing an empty chart under a CONNECTED badge.
+-  bool _awaitingWatch(LiveSignal s) {
+-    if (!_cm.isConnected || !_subs.containsKey(s)) return false;
+-    final last = _lastSample[s];
+-    return last == null ||
+-        DateTime.now().difference(last) > const Duration(seconds: 3);
+-  }
+-
+-  Future<void> _stop(LiveSignal signal) async {
+-    await _subs.remove(signal)?.cancel();
+-    _publishStreaming();
+-    _lastSample.remove(signal);
+-    _buffers[signal]?.clear();
+-    if (_cm.isConnected) {
+-      await _cm
+-          .unsubscribe(signal.service, signal.characteristic)
+-          .catchError((_) {});
+-    }
+-  }
+-
+-  Future<void> _unsubscribeAll() async {
+-    for (final signal in _buffers.keys.toList()) {
+-      if (_cm.isConnected) {
+-        await _cm
+-            .unsubscribe(signal.service, signal.characteristic)
+-            .catchError((_) {});
+-      }
+-    }
+-  }
+-
+-  Future<void> _selectPrimary(LiveSignal signal) async {
+-    if (signal == _primary) {
+-      // Re-tapping the active chip re-arms it. This used to return early, which
+-      // made the *default* signal (ECG) the one you could never restart by
+-      // tapping: if its initial subscribe was missed you had to switch to
+-      // another signal and back. That is exactly the "worked on the second try"
+-      // report.
+-      setState(() => _error = null);
+-      await _stop(signal);
+-      _start(signal);
+-      return;
+-    }
+-    final old = _primary;
++  void _select(LiveSignal signal) {
+     setState(() {
++      if (_compare && signal == _secondary) _secondary = _primary;
+       _primary = signal;
+-      _error = null;
+     });
+-    await _stop(old);
+-    _start(signal);
+-  }
+-
+-  Future<void> _toggleSecondary(LiveSignal signal) async {
+-    if (_secondary == signal) {
+-      setState(() => _secondary = null);
+-      await _stop(signal);
+-    } else {
+-      final old = _secondary;
+-      setState(() => _secondary = signal);
+-      if (old != null) await _stop(old);
+-      _start(signal);
+-    }
++    _restart();
+   }
+ 
+   @override
+   Widget build(BuildContext context) {
+-    if (_resolving) {
+-      return const Center(child: CircularProgressIndicator(color: HpiColors.hr));
+-    }
+-    if (_device == null) return _noDevice();
+-
+-    final expanded = Breakpoints.isExpanded(context);
++    if (_resolving) return const Center(child: CircularProgressIndicator());
++    if (_device == null) {
++      return Center(
++        child: Column(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            Text(
++              'Pair a device to stream live signals',
++              style: HpiText.appBarTitle,
++            ),
++            const SizedBox(height: 16),
++            HpiFilledButton(
++              label: 'Scan for devices',
++              icon: Symbols.search,
++              onPressed: () => Navigator.of(context).pushNamed('/scan'),
++            ),
++          ],
++        ),
++      );
++    }
+     return SafeArea(
+       child: Padding(
+-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
++        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+         child: Column(
+           crossAxisAlignment: CrossAxisAlignment.stretch,
+           children: [
+-            _header(expanded),
+-            const SizedBox(height: 12),
+-            if (!_cm.isConnected)
++            Row(
++              children: [
++                Expanded(
++                  child: Text('Live signals', style: HpiText.screenTitle),
++                ),
++                HpiPill(
++                  label: _connected ? 'CONNECTED' : 'OFFLINE',
++                  color: _connected ? HpiColors.steps : HpiColors.muted,
++                ),
++              ],
++            ),
++            const SizedBox(height: 10),
++            SingleChildScrollView(
++              scrollDirection: Axis.horizontal,
++              child: Row(
++                children: [
++                  for (final signal in LiveSignal.values)
++                    Padding(
++                      padding: const EdgeInsets.only(right: 6),
++                      child: ChoiceChip(
++                        label: Text(signal.label),
++                        selected: _primary == signal,
++                        selectedColor: signal.color.withValues(alpha: 0.22),
++                        onSelected: (_) => _select(signal),
++                        labelStyle: TextStyle(
++                          color:
++                              _primary == signal
++                                  ? signal.color
++                                  : HpiColors.onSurfaceVariant,
++                        ),
++                      ),
++                    ),
++                ],
++              ),
++            ),
++            Row(
++              children: [
++                Switch(
++                  value: _compare,
++                  onChanged: (value) {
++                    setState(() {
++                      _compare = value;
++                      if (_secondary == _primary) {
++                        _secondary = LiveSignal.values.firstWhere(
++                          (s) => s != _primary,
++                        );
++                      }
++                    });
++                    _restart();
++                  },
++                ),
++                const Text('Compare'),
++                const SizedBox(width: 12),
++                if (_compare)
++                  Expanded(
++                    child: DropdownButton<LiveSignal>(
++                      value: _secondary,
++                      isExpanded: true,
++                      underline: const SizedBox.shrink(),
++                      items: [
++                        for (final signal in LiveSignal.values.where(
++                          (s) => s != _primary,
++                        ))
++                          DropdownMenuItem(
++                            value: signal,
++                            child: Text(signal.label),
++                          ),
++                      ],
++                      onChanged: (signal) {
++                        if (signal == null) return;
++                        setState(() => _secondary = signal);
++                        _restart();
++                      },
++                    ),
++                  )
++                else
++                  const Spacer(),
++                if (_connected)
++                  IconButton(
++                    tooltip: 'Retry live streams',
++                    onPressed: _restart,
++                    icon: const Icon(Symbols.refresh),
++                  ),
++              ],
++            ),
++            if (!_connected)
+               Expanded(child: _disconnected())
+             else ...[
+               Expanded(child: _waveformCard(_primary)),
+-              if (expanded && _secondary != null) ...[
+-                const SizedBox(height: 12),
+-                Expanded(child: _waveformCard(_secondary!)),
++              if (_compare) ...[
++                const SizedBox(height: 10),
++                Expanded(child: _waveformCard(_secondary)),
+               ],
+-              const SizedBox(height: 12),
+-              _statsRow(expanded),
+-              if (expanded) ...[
+-                const SizedBox(height: 8),
+-                Text(
+-                  'Both channels share a t_ms timebase — exported CSVs align '
+-                  'row-for-row for correlation studies.',
+-                  style: HpiText.supporting,
+-                ),
+-              ],
++              const SizedBox(height: 10),
++              Text(
++                'PPG is shown in raw counts with an adaptive scale. '
++                'Use watch controls to start measurements.',
++                style: HpiText.supporting,
++              ),
+             ],
+           ],
+         ),
+@@ -348,90 +318,71 @@
+     );
+   }
+ 
+-  Widget _header(bool expanded) {
+-    return Row(
+-      children: [
+-        Text('Live signals', style: HpiText.screenTitle),
+-        const Spacer(),
+-        for (final s in LiveSignal.values) ...[
+-          _signalChip(s, expanded),
+-          const SizedBox(width: 6),
+-        ],
+-        HpiPill(
+-          label: _cm.isConnected ? 'CONNECTED' : 'OFFLINE',
+-          color: _cm.isConnected ? HpiColors.steps : HpiColors.muted,
+-        ),
+-      ],
+-    );
+-  }
+-
+-  /// Tap selects the primary channel. On expanded layouts a long-press adds the
+-  /// signal as the stacked second channel (4b).
+-  Widget _signalChip(LiveSignal s, bool expanded) {
+-    final isPrimary = _primary == s;
+-    final isSecondary = _secondary == s;
+-    final active = isPrimary || isSecondary;
+-    return GestureDetector(
+-      onTap: () => _selectPrimary(s),
+-      onLongPress: expanded && !isPrimary ? () => _toggleSecondary(s) : null,
+-      child: Container(
+-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+-        decoration: BoxDecoration(
+-          color: active
+-              ? HpiMetricColors.tint(s.color, 0.18)
+-              : HpiColors.chipBg,
+-          borderRadius: BorderRadius.circular(999),
+-        ),
+-        child: Text(
+-          s.label,
+-          style: TextStyle(
+-            fontFamily: 'Manrope',
+-            fontSize: 11.5,
+-            fontWeight: FontWeight.w800,
+-            color: active ? s.color : HpiColors.onSurfaceVariant,
+-          ),
+-        ),
+-      ),
+-    );
+-  }
+-
+-  Widget _waveformCard(LiveSignal s) {
+-    final buffer = _buffers.putIfAbsent(s, () => SweepBuffer());
+-    final idle = _awaitingWatch(s);
++  Widget _waveformCard(LiveSignal signal) {
++    final buffer = _buffer(signal);
++    final last = _lastSample[signal];
++    final idle =
++        last == null ||
++        DateTime.now().difference(last) > const Duration(seconds: 3);
++    final error =
++        _cm.isSmpBusy
++            ? 'Live view is paused while the watch transfers recordings or firmware.'
++            : _feed?.errors[signal];
++    final count = _feed?.sampleCounts[signal] ?? 0;
++    final missing = _feed?.missingCounts[signal] ?? 0;
++    final useResearch =
++        signal.isPpg &&
++        (widget.transport?.hasResearch ?? _cm.hasService(researchService));
+     return HpiCard(
+       waveform: true,
+       padding: const EdgeInsets.all(12),
+       child: Column(
+-        crossAxisAlignment: CrossAxisAlignment.start,
++        crossAxisAlignment: CrossAxisAlignment.stretch,
+         children: [
+           Row(
+             children: [
+-              Text(s.label,
+-                  style: HpiText.sectionLabel.copyWith(color: s.color)),
+-              const Spacer(),
+-              Text(s.caption, style: HpiText.mono.copyWith(fontSize: 9.5)),
++              Expanded(
++                child: Text(
++                  signal.isPpg ? '${signal.label} PPG' : signal.label,
++                  style: HpiText.sectionLabel.copyWith(color: signal.color),
++                ),
++              ),
++              Text(
++                '${signal.rate} SPS · 8 s',
++                style: HpiText.mono.copyWith(fontSize: 10),
++              ),
+             ],
++          ),
++          const SizedBox(height: 6),
++          Text(
++            '$count samples · ${useResearch ? '$missing missing after baseline' : 'loss count unavailable'}'
++            '${_latest[signal] == null ? '' : ' · latest ${_latest[signal]!.toStringAsFixed(0)}'}',
++            style: HpiText.supporting,
+           ),
+           const SizedBox(height: 8),
+           Expanded(
+             child: Stack(
+               children: [
+                 Positioned.fill(
+-                    child: HpiSweepWaveform(buffer: buffer, color: s.color)),
+-                if (idle)
++                  child: HpiSweepWaveform(buffer: buffer, color: signal.color),
++                ),
++                if (idle || error != null)
+                   Positioned.fill(
+-                    child: Center(
+-                      child: Padding(
+-                        padding: const EdgeInsets.symmetric(horizontal: 24),
++                    child: Container(
++                      color: HpiColors.waveformBg.withValues(alpha: 0.88),
++                      alignment: Alignment.center,
++                      padding: const EdgeInsets.all(12),
++                      child: SingleChildScrollView(
+                         child: Text(
+-                          s.watchGated
+-                              ? 'Start a ${s.label} measurement on your watch to '
+-                                  'stream here.\n${s.label} only runs during a '
+-                                  'spot check.'
+-                              : 'Waiting for ${s.label} data from the watch…',
++                          error ?? signal.waitingHint,
+                           textAlign: TextAlign.center,
+                           style: HpiText.body.copyWith(
+-                              fontSize: 12, color: HpiColors.onSurfaceVariant),
++                            fontSize: 12,
++                            color:
++                                error == null
++                                    ? HpiColors.onSurfaceVariant
++                                    : HpiColors.error,
++                          ),
+                         ),
+                       ),
+                     ),
+@@ -444,91 +395,28 @@
+     );
+   }
+ 
+-  Widget _statsRow(bool expanded) {
+-    return Row(
++  Widget _disconnected() => Center(
++    child: Column(
++      mainAxisSize: MainAxisSize.min,
+       children: [
+-        // HR/RR derivation from the live trace isn't implemented — show "—"
+-        // rather than a fabricated number.
+-        const Expanded(child: HpiStatChip(value: '—', label: 'BPM')),
+-        const SizedBox(width: 10),
+-        const Expanded(child: HpiStatChip(value: '—', label: 'RR-int ms')),
+-        const SizedBox(width: 10),
+-        Expanded(
+-          child: HpiStatChip(
+-            value: _cm.isConnected ? 'ON' : 'OFF',
+-            label: 'Link',
+-            valueColor: _cm.isConnected ? HpiColors.steps : HpiColors.muted,
++        const Icon(Symbols.bluetooth, size: 40, color: HpiColors.muted),
++        const SizedBox(height: 12),
++        Text('Connect to ${_device!.displayName}', style: HpiText.appBarTitle),
++        if (_connectionError != null)
++          Padding(
++            padding: const EdgeInsets.all(12),
++            child: Text(
++              _connectionError!,
++              style: const TextStyle(color: HpiColors.error),
++            ),
+           ),
+-        ),
+-        const SizedBox(width: 12),
+-        SizedBox(
+-          width: expanded ? 240 : 150,
+-          child: HpiFilledButton(
+-            label: 'Record 30 s',
+-            icon: Symbols.fiber_manual_record,
+-            onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
+-              const SnackBar(
+-                content: Text(
+-                    'On-device recording is started from the Recordings tab.'),
+-              ),
+-            ),
+-          ),
++        const SizedBox(height: 16),
++        HpiFilledButton(
++          label: 'Connect',
++          icon: Symbols.bluetooth,
++          onPressed: _connect,
+         ),
+       ],
+-    );
+-  }
+-
+-  Widget _disconnected() {
+-    return Center(
+-      child: Column(
+-        mainAxisSize: MainAxisSize.min,
+-        children: [
+-          const Icon(Symbols.ecg_heart, size: 44, color: HpiColors.disabled),
+-          const SizedBox(height: 12),
+-          Text('Not streaming', style: HpiText.appBarTitle),
+-          const SizedBox(height: 6),
+-          Text('Connect to ${_device!.displayName} to see live signals.',
+-              style: HpiText.body.copyWith(fontSize: 12)),
+-          if (_error != null) ...[
+-            const SizedBox(height: 8),
+-            Text(_error!,
+-                textAlign: TextAlign.center,
+-                style: HpiText.supporting.copyWith(color: HpiColors.error)),
+-          ],
+-          const SizedBox(height: 18),
+-          SizedBox(
+-            width: 220,
+-            child: HpiFilledButton(
+-              label: 'Connect',
+-              icon: Symbols.bluetooth,
+-              onPressed: _connect,
+-            ),
+-          ),
+-        ],
+-      ),
+-    );
+-  }
+-
+-  Widget _noDevice() {
+-    return Center(
+-      child: Column(
+-        mainAxisSize: MainAxisSize.min,
+-        children: [
+-          const Icon(Symbols.ecg_heart, size: 44, color: HpiColors.disabled),
+-          const SizedBox(height: 12),
+-          Text('Pair a device to stream live signals',
+-              style: HpiText.appBarTitle, textAlign: TextAlign.center),
+-          const SizedBox(height: 18),
+-          SizedBox(
+-            width: 220,
+-            child: HpiFilledButton(
+-              label: 'Scan for devices',
+-              icon: Symbols.search,
+-              onPressed: () => Navigator.of(context).pushNamed('/scan'),
+-            ),
+-          ),
+-        ],
+-      ),
+-    );
+-  }
++    ),
++  );
+ }
+--- a/lib/screens/scr_main_shell.dart
++++ b/lib/screens/scr_main_shell.dart
+@@ -100,7 +100,7 @@
+     final tabs = [
+       const ScrHome(),
+       const ScrTrendsHub(),
+-      const ScrLive(),
++      ScrLive(active: _index == 2),
+       const ScrDeviceNew(),
+     ];
+     return HpiAdaptiveScaffold(
+--- a/lib/ui/charts/hpi_sweep_waveform.dart
++++ b/lib/ui/charts/hpi_sweep_waveform.dart
+@@ -3,6 +3,7 @@
+ 
+ import 'package:flutter/material.dart';
+ import '../../theme/hpi_colors.dart';
++import '../../utils/signal_view.dart';
+ 
+ /// A monitor-style sweeping waveform (handoff 1f live ECG, 4b dual-signal).
+ ///
+@@ -11,10 +12,11 @@
+ /// like a bedside monitor rather than scrolling. Feed it with [SweepBuffer],
+ /// which owns the ring and the head index.
+ class SweepBuffer extends ChangeNotifier {
+-  SweepBuffer({this.capacity = 512, this.gap = 16})
+-      : _samples = List<double?>.filled(capacity, null);
++  SweepBuffer({this.capacity = 512, this.gap = 16, this.robustScale = false})
++    : _samples = List<double?>.filled(capacity, null);
+ 
+   final int capacity;
++  final bool robustScale;
+ 
+   /// Blanked samples ahead of the write head (the erase gap).
+   final int gap;
+@@ -52,6 +54,10 @@
+   /// Auto-scaled bounds over the populated samples, with a floor so a flat or
+   /// empty trace doesn't blow up the scale.
+   (double, double) bounds() {
++    if (robustScale) {
++      final range = robustRange(_samples.whereType<double>());
++      return (range.lo, range.hi);
++    }
+     double? lo, hi;
+     for (final s in _samples) {
+       if (s == null) continue;
+@@ -87,16 +93,17 @@
+   Widget build(BuildContext context) {
+     return AnimatedBuilder(
+       animation: buffer,
+-      builder: (context, child) => SizedBox.expand(
+-        child: CustomPaint(
+-          painter: _SweepPainter(
+-            buffer: buffer,
+-            color: color,
+-            strokeWidth: strokeWidth,
+-            showGrid: showGrid,
++      builder:
++          (context, child) => SizedBox.expand(
++            child: CustomPaint(
++              painter: _SweepPainter(
++                buffer: buffer,
++                color: color,
++                strokeWidth: strokeWidth,
++                showGrid: showGrid,
++              ),
++            ),
+           ),
+-        ),
+-      ),
+     );
+   }
+ }
+@@ -117,9 +124,10 @@
+   @override
+   void paint(Canvas canvas, Size size) {
+     if (showGrid) {
+-      final grid = Paint()
+-        ..color = color.withValues(alpha: 0.08)
+-        ..strokeWidth = 1;
++      final grid =
++          Paint()
++            ..color = color.withValues(alpha: 0.08)
++            ..strokeWidth = 1;
+       const cell = 17.0;
+       for (double x = 0; x < size.width; x += cell) {
+         canvas.drawLine(Offset(x, 0), Offset(x, size.height), grid);
+@@ -135,12 +143,13 @@
+     double y(double v) =>
+         size.height * (1 - (v - lo) / (hi - lo)).clamp(0.0, 1.0);
+ 
+-    final trace = Paint()
+-      ..color = color
+-      ..style = PaintingStyle.stroke
+-      ..strokeWidth = strokeWidth
+-      ..strokeJoin = StrokeJoin.round
+-      ..strokeCap = StrokeCap.round;
++    final trace =
++        Paint()
++          ..color = color
++          ..style = PaintingStyle.stroke
++          ..strokeWidth = strokeWidth
++          ..strokeJoin = StrokeJoin.round
++          ..strokeCap = StrokeCap.round;
+ 
+     // Draw contiguous runs; a null (erased) sample ends the current run.
+     Path? path;
+--- a/lib/utils/connection_manager.dart
++++ b/lib/utils/connection_manager.dart
+@@ -62,6 +62,8 @@
+   Object? _smpToken;
+ 
+   bool _streaming = false;
++  Set<String> _serviceUuids = {};
++  bool hasService(String uuid) => _serviceUuids.contains(uuid.toLowerCase());
+ 
+   String? get deviceId => _deviceId;
+   String? get deviceName => _deviceName;
+@@ -160,7 +162,8 @@
+       // REQUIRED before any subscribe/write: CoreBluetooth (and Android GATT)
+       // only expose characteristics after service discovery. Without this,
+       // connect succeeds but notify/write silently fail.
+-      await _ble.discoverServices(deviceId);
++      _serviceUuids = (await _ble.discoverServiceUuids(deviceId))
++          .map((uuid) => uuid.toLowerCase()).toSet();
+       await _connSub?.cancel();
+       _connSub = _ble.connectionStream(deviceId).listen((connected) {
+         if (!connected && !_intentional && _state == LinkState.connected) {
+--- /dev/null
++++ b/lib/utils/live_stream_controller.dart
+@@ -0,0 +1,215 @@
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import '../ble/research_packet.dart';
++import '../models/live_signal.dart';
++import 'ble_manager.dart';
++import 'connection_manager.dart';
++
++typedef LiveRoute = ({String service, String characteristic});
++
++abstract interface class LiveTransport {
++  bool get connected;
++  bool get hasResearch;
++  Future<void> pair();
++  Stream<Uint8List> values(LiveRoute route);
++  Future<void> enable(LiveRoute route);
++  Future<void> disable(LiveRoute route);
++}
++
++class ConnectedLiveTransport implements LiveTransport {
++  ConnectedLiveTransport(this.deviceId);
++  final String deviceId;
++  final _cm = ConnectionManager.instance;
++  final _ble = BleManager.instance;
++  @override
++  bool get connected => _cm.isConnected && _cm.deviceId == deviceId;
++  @override
++  bool get hasResearch => connected && _cm.hasService(researchService);
++  @override
++  Future<void> pair() async {
++    if (defaultTargetPlatform == TargetPlatform.android &&
++        await _ble.isPaired(deviceId) != true) {
++      await _ble.pair(deviceId);
++    }
++    await _cm.requestMtu(247);
++  }
++
++  @override
++  Stream<Uint8List> values(LiveRoute route) =>
++      _ble.notifications(deviceId, route.characteristic);
++  @override
++  Future<void> enable(LiveRoute route) =>
++      _ble.subscribe(deviceId, route.service, route.characteristic);
++  @override
++  Future<void> disable(LiveRoute route) =>
++      _ble.unsubscribe(deviceId, route.service, route.characteristic);
++}
++
++/// Serializes route changes so two PPG charts share one encrypted subscription.
++/// A generation guard drops late notifications and late pairing/subscription work.
++class LiveStreamController extends ChangeNotifier {
++  LiveStreamController(this.transport, {required this.onSamples});
++  final LiveTransport transport;
++  final void Function(LiveSignal signal, List<double> values, bool breakBefore)
++  onSamples;
++  final errors = <LiveSignal, String>{};
++  final active = <LiveSignal>{};
++  final sampleCounts = <LiveSignal, int>{};
++  final missingCounts = <LiveSignal, int>{};
++  final _subscriptions = <LiveRoute, StreamSubscription<Uint8List>>{};
++  Set<LiveSignal> _wanted = {};
++  Future<void> _serial = Future.value();
++  int _revision = 0;
++  bool _closed = false;
++  bool get isStreaming => active.isNotEmpty;
++
++  Future<void> select(Set<LiveSignal> wanted) {
++    if (_closed) return Future.value();
++    _wanted = Set.of(wanted);
++    final revision = ++_revision;
++    active.clear();
++    notifyListeners();
++    _serial = _serial.then((_) => _apply(revision));
++    return _serial;
++  }
++
++  bool _current(int revision) =>
++      !_closed && revision == _revision && transport.connected;
++
++  Future<void> _clearRoutes() async {
++    final old = Map.of(_subscriptions);
++    _subscriptions.clear();
++    for (final entry in old.entries) {
++      await entry.value.cancel();
++      if (transport.connected) {
++        try {
++          await transport
++              .disable(entry.key)
++              .timeout(const Duration(seconds: 5));
++        } catch (_) {
++          /* A dropped link has already removed its CCC subscriptions. */
++        }
++      }
++    }
++  }
++
++  Future<void> _apply(int revision) async {
++    if (_closed || revision != _revision) return;
++    await _clearRoutes();
++    if (!_current(revision)) return;
++    errors.clear();
++    sampleCounts.clear();
++    missingCounts.clear();
++    final routes = <LiveRoute, Set<LiveSignal>>{};
++    for (final signal in _wanted) {
++      if (signal.researchRequired && !transport.hasResearch) {
++        errors[signal] =
++            'This channel needs the custom 3.1.1-ppg firmware. '
++            'Reconnect after updating the watch.';
++        continue;
++      }
++      final route =
++          signal.isPpg && transport.hasResearch
++              ? (service: researchService, characteristic: researchData)
++              : (
++                service: signal.legacyService,
++                characteristic: signal.legacyCharacteristic,
++              );
++      routes.putIfAbsent(route, () => {}).add(signal);
++    }
++    final continuity = ResearchContinuity();
++    for (final entry in routes.entries) {
++      if (!_current(revision)) return;
++      final research = entry.key.service == researchService;
++      try {
++        if (research) {
++          await transport.pair().timeout(const Duration(seconds: 30));
++          if (!_current(revision)) return;
++        }
++        _subscriptions[entry.key] = transport
++            .values(entry.key)
++            .listen(
++              (bytes) {
++                if (!_current(revision)) return;
++                try {
++                  if (research) {
++                    final packet = ResearchPacket.decode(bytes);
++                    if (packet == null) return;
++                    for (final signal in entry.value) {
++                      if (signal.researchId != packet.signalId) continue;
++                      final check = continuity.observe(packet);
++                      if (check == null) continue;
++                      missingCounts[signal] =
++                          (missingCounts[signal] ?? 0) + check.missing;
++                      _accept(
++                        signal,
++                        packet.values,
++                        check.reset || check.missing > 0,
++                      );
++                    }
++                  } else {
++                    for (final signal in entry.value) {
++                      _accept(signal, signal.decodeLegacy(bytes), false);
++                    }
++                  }
++                } on FormatException {
++                  _report(
++                    entry.value,
++                    'Received a malformed packet. Waiting for valid data.',
++                  );
++                }
++              },
++              onError: (Object error) {
++                if (_current(revision)) {
++                  active.removeAll(entry.value);
++                  _report(entry.value, 'Live stream interrupted: $error');
++                }
++              },
++            );
++        await transport.enable(entry.key).timeout(const Duration(seconds: 15));
++        if (!_current(revision)) return;
++        active.addAll(entry.value);
++      } catch (error) {
++        if (!_current(revision)) return;
++        await _subscriptions.remove(entry.key)?.cancel();
++        try {
++          await transport
++              .disable(entry.key)
++              .timeout(const Duration(seconds: 5));
++        } catch (_) {}
++        _report(
++          entry.value,
++          research
++              ? 'Could not open the encrypted PPG stream. Accept pairing on the phone/watch, then tap Retry. ($error)'
++              : 'Could not start this live stream: $error',
++        );
++      }
++    }
++    if (!_closed) notifyListeners();
++  }
++
++  void _accept(LiveSignal signal, List<double> values, bool breakBefore) {
++    sampleCounts[signal] = (sampleCounts[signal] ?? 0) + values.length;
++    if (errors.remove(signal) != null) notifyListeners();
++    onSamples(signal, values, breakBefore);
++  }
++
++  void _report(Set<LiveSignal> signals, String message) {
++    if (_closed) return;
++    for (final signal in signals) {
++      errors[signal] = message;
++    }
++    notifyListeners();
++  }
++
++  @override
++  void dispose() {
++    _closed = true;
++    ++_revision;
++    active.clear();
++    _serial = _serial.then((_) => _clearRoutes());
++    super.dispose();
++  }
++}
+--- a/pubspec.lock
++++ b/pubspec.lock
+@@ -517,10 +517,10 @@
+     dependency: transitive
+     description:
+       name: matcher
+-      sha256: dc0b7dc7651697ea4ff3e69ef44b0407ea32c487a39fff6a4004fa585e901861
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.12.19"
++      sha256: "31bd099b47c10cd1aeb55146a2d46ce0277630ecef3f7dae54ad7873f36696cd"
++      url: "https://pub.dev"
++    source: hosted
++    version: "0.12.20"
+   material_color_utilities:
+     dependency: transitive
+     description:
+@@ -549,10 +549,10 @@
+     dependency: transitive
+     description:
+       name: meta
+-      sha256: "1741988757a65eb6b36abe716829688cf01910bbf91c34354ff7ec1c3de2b349"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "1.18.0"
++      sha256: "307249ce4ff29d58a18e97f6345f539382eb9c9c29ecda628900f31de0443dd9"
++      url: "https://pub.dev"
++    source: hosted
++    version: "1.19.0"
+   mime:
+     dependency: transitive
+     description:
+@@ -922,10 +922,10 @@
+     dependency: transitive
+     description:
+       name: test_api
+-      sha256: "949a932224383300f01be9221c39180316445ecb8e7547f70a41a35bf421fb9e"
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "0.7.11"
++      sha256: "2a122cbe059f8b610d3a5415f42e255b6c17b1f21eee1d960f31080237fb4f11"
++      url: "https://pub.dev"
++    source: hosted
++    version: "0.7.12"
+   typed_data:
+     dependency: transitive
+     description:
+@@ -1026,10 +1026,10 @@
+     dependency: transitive
+     description:
+       name: vector_math
+-      sha256: d530bd74fea330e6e364cda7a85019c434070188383e1cd8d9777ee586914c5b
+-      url: "https://pub.dev"
+-    source: hosted
+-    version: "2.2.0"
++      sha256: fa49e1674cb84acb900141714e6c6e1f9ae099827c24d141430ff6819db4e1bc
++      url: "https://pub.dev"
++    source: hosted
++    version: "2.4.4"
+   version:
+     dependency: transitive
+     description:
+--- a/pubspec.yaml
++++ b/pubspec.yaml
+@@ -1,7 +1,7 @@
+ name: move
+ description: "HealthyPi Move"
+ publish_to: 'none'
+-version: 3.0.8+96
++version: 3.0.9+97
+ 
+ environment:
+   sdk: ^3.7.0
+--- /dev/null
++++ b/test/live_screen_test.dart
+@@ -0,0 +1,101 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:move/models/device_info.dart';
++import 'package:move/screens/scr_live.dart';
++import 'package:move/theme/hpi_theme.dart';
++import 'package:move/ui/charts/hpi_sweep_waveform.dart';
++import 'live_stream_controller_test.dart' show FakeLiveTransport;
++import 'research_packet_test.dart' show packet;
++
++void main() {
++  testWidgets('leaving Live stops subscriptions and returning restarts them', (
++    tester,
++  ) async {
++    final transport = FakeLiveTransport();
++    final device = DeviceInfo(
++      macAddress: 'watch',
++      deviceName: 'Test watch',
++      firstPaired: DateTime(2026),
++    );
++    Widget screen(bool active) => MaterialApp(
++      theme: HpiTheme.dark(),
++      home: Scaffold(
++        body: ScrLive(
++          initialDevice: device,
++          transport: transport,
++          active: active,
++        ),
++      ),
++    );
++    await tester.pumpWidget(screen(false));
++    await tester.pumpAndSettle();
++    expect(transport.enabled, isEmpty);
++    await tester.pumpWidget(screen(true));
++    await tester.pumpAndSettle();
++    expect(transport.enabled.length, 1);
++    await tester.pumpWidget(screen(false));
++    await tester.pump();
++    await tester.runAsync(
++      () => Future<void>.delayed(const Duration(milliseconds: 10)),
++    );
++    await tester.pumpAndSettle();
++    expect(transport.disabled.length, 1);
++    expect(transport.streams.values.single.hasListener, isFalse);
++    await tester.pumpWidget(screen(true));
++    await tester.pumpAndSettle();
++    expect(transport.enabled.length, 2);
++    await tester.pumpWidget(const SizedBox());
++    await tester.runAsync(
++      () => Future<void>.delayed(const Duration(milliseconds: 10)),
++    );
++    await tester.pump();
++  });
++  for (final size in [const Size(360, 640), const Size(800, 1000)]) {
++    testWidgets('PPG selection and comparison fit $size', (tester) async {
++      tester.view.physicalSize = size;
++      tester.view.devicePixelRatio = 1;
++      addTearDown(tester.view.resetPhysicalSize);
++      addTearDown(tester.view.resetDevicePixelRatio);
++      final transport = FakeLiveTransport();
++      await tester.pumpWidget(
++        MaterialApp(
++          theme: HpiTheme.dark(),
++          home: Scaffold(
++            body: ScrLive(
++              initialDevice: DeviceInfo(
++                macAddress: 'watch',
++                deviceName: 'Test watch',
++                firstPaired: DateTime(2026),
++              ),
++              transport: transport,
++            ),
++          ),
++        ),
++      );
++      await tester.pumpAndSettle();
++      expect(find.text('Wrist green PPG'), findsOneWidget);
++      await tester.tap(find.text('Wrist red').first);
++      await tester.pump();
++      await tester.runAsync(
++        () => Future<void>.delayed(const Duration(milliseconds: 10)),
++      );
++      await tester.pump(const Duration(milliseconds: 100));
++      await tester.pumpAndSettle();
++      expect(find.text('Wrist red PPG'), findsOneWidget);
++      await tester.tap(find.byType(Switch));
++      await tester.pump();
++      await tester.runAsync(
++        () => Future<void>.delayed(const Duration(milliseconds: 10)),
++      );
++      await tester.pump(const Duration(milliseconds: 100));
++      await tester.pumpAndSettle();
++      expect(find.byType(HpiSweepWaveform), findsNWidgets(2));
++      transport.emit(packet(signal: 9));
++      await tester.pump(const Duration(seconds: 1));
++      expect(find.textContaining('3 samples'), findsOneWidget);
++      expect(tester.takeException(), isNull);
++      await tester.pumpWidget(const SizedBox());
++      await tester.pump();
++    });
++  }
++}
+--- /dev/null
++++ b/test/live_stream_controller_test.dart
+@@ -0,0 +1,153 @@
++import 'dart:async';
++import 'dart:typed_data';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:move/ble/research_packet.dart';
++import 'package:move/models/live_signal.dart';
++import 'package:move/utils/live_stream_controller.dart';
++import 'research_packet_test.dart' show packet;
++
++class FakeLiveTransport implements LiveTransport {
++  @override
++  bool connected = true;
++  @override
++  bool hasResearch = true;
++  final streams = <LiveRoute, StreamController<Uint8List>>{};
++  final enabled = <LiveRoute>[];
++  final disabled = <LiveRoute>[];
++  Completer<void>? pairing;
++  bool failEnable = false;
++  @override
++  Future<void> pair() async {
++    await pairing?.future;
++  }
++
++  @override
++  Stream<Uint8List> values(LiveRoute route) =>
++      streams
++          .putIfAbsent(route, () => StreamController.broadcast(sync: true))
++          .stream;
++  @override
++  Future<void> enable(LiveRoute route) async {
++    if (failEnable) throw StateError('pairing rejected');
++    enabled.add(route);
++  }
++
++  @override
++  Future<void> disable(LiveRoute route) async {
++    disabled.add(route);
++  }
++
++  void emit(Uint8List bytes) =>
++      streams[(service: researchService, characteristic: researchData)]!.add(
++        bytes,
++      );
++}
++
++void main() {
++  test(
++    'retargeting an active PPG subscription completes cleanup and restart',
++    () async {
++      final transport = FakeLiveTransport();
++      final feed = LiveStreamController(transport, onSamples: (_, _, _) {});
++      await feed.select({LiveSignal.wristGreen});
++      await feed.select({LiveSignal.wristRed});
++      await feed.select({LiveSignal.wristRed, LiveSignal.ecg});
++      expect(feed.active, {LiveSignal.wristRed, LiveSignal.ecg});
++      expect(transport.enabled.length, 4);
++      feed.dispose();
++    },
++  );
++  test(
++    'two PPG charts share one subscription and route samples by ID',
++    () async {
++      final transport = FakeLiveTransport();
++      final received = <LiveSignal, List<double>>{};
++      final feed = LiveStreamController(
++        transport,
++        onSamples: (s, v, _) => received[s] = v,
++      );
++      await feed.select({LiveSignal.wristRed, LiveSignal.wristIr});
++      expect(transport.enabled.length, 1);
++      transport.emit(packet(signal: 9));
++      transport.emit(packet(signal: 10, samples: [15, 16]));
++      transport.emit(packet(signal: 11, samples: [99]));
++      expect(
++        received.keys,
++        unorderedEquals([LiveSignal.wristRed, LiveSignal.wristIr]),
++      );
++      expect(received[LiveSignal.wristRed], [0, 4000000000, 4294967295]);
++      expect(received[LiveSignal.wristIr], [15, 16]);
++      await feed.select({});
++      expect(transport.disabled.length, 1);
++      expect(feed.isStreaming, isFalse);
++      feed.dispose();
++    },
++  );
++  test(
++    'old firmware keeps original streams and explains unavailable channels',
++    () async {
++      final transport = FakeLiveTransport()..hasResearch = false;
++      final feed = LiveStreamController(transport, onSamples: (_, _, _) {});
++      await feed.select({LiveSignal.wristGreen, LiveSignal.wristRed});
++      expect(feed.active, {LiveSignal.wristGreen});
++      expect(feed.errors[LiveSignal.wristRed], contains('3.1.1-ppg'));
++      expect(
++        transport.enabled.single.characteristic,
++        LiveSignal.wristGreen.legacyCharacteristic,
++      );
++      feed.dispose();
++    },
++  );
++  test(
++    'a selection change during pairing enables only the newest selection',
++    () async {
++      final transport = FakeLiveTransport()..pairing = Completer<void>();
++      final feed = LiveStreamController(transport, onSamples: (_, _, _) {});
++      final first = feed.select({LiveSignal.wristRed});
++      await Future<void>.delayed(Duration.zero);
++      final second = feed.select({LiveSignal.fingerRed});
++      transport.pairing!.complete();
++      await first;
++      await second;
++      expect(feed.active, {LiveSignal.fingerRed});
++      expect(transport.enabled.length, 1);
++      feed.dispose();
++    },
++  );
++  test('subscribe errors are visible and retry can recover', () async {
++    final transport = FakeLiveTransport()..failEnable = true;
++    final feed = LiveStreamController(transport, onSamples: (_, _, _) {});
++    await feed.select({LiveSignal.wristIr});
++    expect(feed.isStreaming, isFalse);
++    expect(feed.errors[LiveSignal.wristIr], contains('pairing'));
++    transport.failEnable = false;
++    await feed.select({LiveSignal.wristIr});
++    expect(feed.isStreaming, isTrue);
++    expect(feed.errors, isEmpty);
++    feed.dispose();
++  });
++  test(
++    'missing indices break the trace; malformed packets do not add samples',
++    () async {
++      final transport = FakeLiveTransport();
++      final breaks = <bool>[];
++      final feed = LiveStreamController(
++        transport,
++        onSamples: (_, _, b) => breaks.add(b),
++      );
++      await feed.select({LiveSignal.fingerRed});
++      transport.emit(packet(signal: 11, index: 0, samples: [1, 2]));
++      transport.emit(Uint8List(19));
++      expect(feed.errors, isNotEmpty);
++      transport.emit(packet(signal: 11, index: 5, samples: [3]));
++      expect(breaks, [false, true]);
++      expect(feed.missingCounts[LiveSignal.fingerRed], 3);
++      expect(feed.sampleCounts[LiveSignal.fingerRed], 3);
++      expect(feed.errors, isEmpty);
++      transport.connected = false;
++      await feed.select({LiveSignal.fingerRed});
++      expect(feed.isStreaming, isFalse);
++      feed.dispose();
++    },
++  );
++}
+--- /dev/null
++++ b/test/research_packet_test.dart
+@@ -0,0 +1,82 @@
++import 'dart:typed_data';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:move/ble/research_packet.dart';
++import 'package:move/models/live_signal.dart';
++
++Uint8List packet({
++  int signal = 9,
++  int index = 10,
++  int boot = 42,
++  int flags = 1,
++  List<int> samples = const [0, 4000000000, 4294967295],
++}) {
++  final bytes = ByteData(16 + samples.length * 4);
++  bytes.setUint8(0, 1);
++  bytes.setUint8(1, signal);
++  bytes.setUint8(2, flags);
++  bytes.setUint8(3, samples.length);
++  bytes.setUint32(4, boot, Endian.little);
++  bytes.setUint32(8, index, Endian.little);
++  bytes.setUint32(12, 1234, Endian.little);
++  for (int i = 0; i < samples.length; i++) {
++    bytes.setUint32(16 + i * 4, samples[i], Endian.little);
++  }
++  return bytes.buffer.asUint8List();
++}
++
++void main() {
++  test('all five PPG channels preserve unsigned counts and slice offsets', () {
++    for (final signal in [3, 4, 9, 10, 11]) {
++      final payload = packet(signal: signal);
++      final padded = Uint8List(payload.length + 7)
++        ..setRange(7, payload.length + 7, payload);
++      final decoded = ResearchPacket.decode(Uint8List.sublistView(padded, 7))!;
++      expect(decoded.signalId, signal);
++      expect(decoded.values, [0, 4000000000, 4294967295]);
++      expect(decoded.firstIndex, 10);
++      expect(decoded.estimatedUptimeMs, 1234);
++    }
++  });
++  test('rejects malformed lengths, signed PPG and multi-value scalars', () {
++    expect(() => ResearchPacket.decode(Uint8List(19)), throwsFormatException);
++    expect(
++      () => ResearchPacket.decode(packet(flags: 3)),
++      throwsFormatException,
++    );
++    expect(
++      () => ResearchPacket.decode(packet(signal: 8)),
++      throwsFormatException,
++    );
++    final truncated = packet().sublist(0, 24);
++    expect(() => ResearchPacket.decode(truncated), throwsFormatException);
++    expect(ResearchPacket.decode(packet(signal: 12)), isNull);
++  });
++  test('per-channel continuity handles gaps, duplicates, wrap and reboot', () {
++    final tracker = ResearchContinuity();
++    ResearchPacket p(int signal, int index, {int boot = 42}) =>
++        ResearchPacket.decode(
++          packet(signal: signal, index: index, boot: boot, samples: [1, 2]),
++        )!;
++    expect(tracker.observe(p(9, 0xfffffffe))!.missing, 0);
++    expect(tracker.observe(p(9, 0))!.missing, 0);
++    expect(tracker.observe(p(10, 100))!.missing, 0);
++    expect(tracker.observe(p(9, 5))!.missing, 3);
++    expect(tracker.observe(p(9, 5)), isNull);
++    expect(tracker.observe(p(10, 102))!.missing, 0);
++    expect(tracker.observe(p(9, 0, boot: 43))!.reset, isTrue);
++  });
++  test('legacy samples decode little endian and validate width', () {
++    expect(
++      LiveSignal.wristGreen.decodeLegacy(Uint8List.fromList([0, 40, 107, 238])),
++      [4000000000],
++    );
++    expect(
++      LiveSignal.ecg.decodeLegacy(Uint8List.fromList([244, 255, 255, 255])),
++      [-12],
++    );
++    expect(
++      () => LiveSignal.fingerIr.decodeLegacy(Uint8List(3)),
++      throwsFormatException,
++    );
++  });
++}

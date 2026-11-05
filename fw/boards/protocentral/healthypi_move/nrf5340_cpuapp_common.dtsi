@@ -1,0 +1,445 @@
+
+/*
+ * Copyright (c) 2019-2020 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include "nrf5340_cpuapp_common-pinctrl.dtsi"
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/regulator/npm13xx.h>
+
+#include <zephyr/dt-bindings/mipi_dbi/mipi_dbi.h>
+#include <zephyr/dt-bindings/lvgl/lvgl.h>
+
+/ {
+
+	chosen {
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		zephyr,uart-mcumgr = &uart0;
+		zephyr,bt-mon-uart = &uart0;
+		zephyr,bt-c2h-uart = &uart0;
+		zephyr,bt-hci = &bt_hci_ipc0;
+		nordic,802154-spinel-ipc = &ipc0;
+		zephyr,ieee802154 = &ieee802154;
+		nordic,pm-ext-flash = &w25q01jv;
+		zephyr,display= &sh8601;
+	};
+
+	gpiokeys: gpio_keys {
+		compatible = "gpio-keys";
+		button_up: sw1 {
+			label = "Button Up / Extra Button";
+			gpios = <&gpio0 3 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_UP>;
+		};
+
+		button_down: sw3 {
+			label = "Home Button";
+			gpios = <&gpio0 5 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_HOME>;
+		};
+
+		/*max30001_intb: max30001_intb {
+			label = "MAX30001 INTB";
+			gpios = <&gpio1 9 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			zephyr,code = <INPUT_KEY_0>;
+		};*/
+	};
+
+	ctrlgpio: gpio_ctrl {
+		compatible = "gpio-leds";
+		sensor_dcdc_en: dcdc_en {
+			gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>;
+			label = "Boost 5V converter enable";
+		};
+	};
+
+	gpio_fwd: nrf-gpio-forwarder {
+		compatible = "nordic,nrf-gpio-forwarder";
+		status = "okay";
+		uart {
+			gpios = <&gpio1 1 0>, <&gpio1 0 0>, <&gpio0 10 0>;
+		};
+	};
+
+	/*mipi_dbi {
+		compatible = "zephyr,mipi-dbi-spi";
+		reset-gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
+		//dc-gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
+		spi-dev = <&spi4>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+	
+		sh8601: sh8601@0 {
+			compatible = "sitronix,sh8601";
+			spi-max-frequency = <DT_FREQ_M(33)>;
+			reg = <0>;
+			reset-gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
+			//<&gpio0 29 GPIO_ACTIVE_HIGH>;
+			width = <390>;
+			height = <390>;
+			pixel-format = <0>;
+			display-inversion;
+			rotation = <0>;
+			status = "okay";
+			//zephyr,deferred-init;
+		};
+	};*/
+
+	aliases {
+		max30001 = &max30001;
+		max32664d = &max32664d;
+		//maxm86146 = &maxm86146;
+		max32664c = &max32664c;
+		rtc = &rtc_rv;
+	};
+
+	pointer {
+		compatible = "zephyr,lvgl-pointer-input";
+		input = <&chsc5816>;
+		swap-xy;
+	};
+};
+
+&vregmain {
+	regulator-initial-mode = <NRF5X_REG_MODE_DCDC>;
+};
+
+&vregradio {
+	regulator-initial-mode = <NRF5X_REG_MODE_DCDC>;
+};
+
+&vregh {
+	status = "okay";
+};
+
+&uicr {
+	nfct-pins-as-gpios;
+};
+
+&gpiote {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&i2c1 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	pinctrl-0 = <&i2c1_default>;
+	pinctrl-1 = <&i2c1_sleep>;
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-names = "default", "sleep";
+	zephyr,concat-buf-size = <8250>;
+	zephyr,flash-buf-max-size = <8250>;
+
+	npm_pmic: pmic@6b {
+		compatible = "nordic,npm1300";
+		status = "okay";
+		//host-int-gpios = <&gpio0 7 GPIO_ACTIVE_LOW>;
+		//pmic-int-pin = <2>;
+		reg = <0x6b>;
+
+		npm_pmic_gpio: gpio-controller {
+			compatible = "nordic,npm1300-gpio";
+			gpio-controller;
+			#gpio-cells = <2>;
+			ngpios = <5>;
+		};
+
+		npm_pmic_regulators: regulators {
+			compatible = "nordic,npm1300-regulator";
+			status = "okay";
+
+			// BUCK1 is 3V, used to power the MCU
+			npm_pmic_buck1: BUCK1 {
+				regulator-min-microvolt = <3000000>;
+				regulator-max-microvolt = <3000000>;
+				regulator-initial-mode = <NPM13XX_BUCK_MODE_AUTO>;
+			};
+
+			// BUCK2 is 1.8V, used to power all sensors - except Finger Sensor
+			npm_pmic_buck2: BUCK2 {
+				regulator-min-microvolt = <2000000>;
+				regulator-max-microvolt = <2000000>;
+				regulator-initial-mode = <NPM13XX_BUCK_MODE_PWM>;
+			};
+
+			// LDO1 input is 3V, used as LDSW to control Display Power
+			npm_pmic_ldo1: LDO1 {
+				regulator-initial-mode = <NPM13XX_LDSW_MODE_LDSW>;
+				regulator-boot-off;
+			};
+
+			// LDO2 input is 3V, used as LDSW to control FING_SEN_V for MAX32664D
+			npm_pmic_ldo2: LDO2 {
+				regulator-initial-mode = <NPM13XX_LDSW_MODE_LDSW>;
+				regulator-boot-off;
+			};
+		};
+
+		npm_pmic_charger: charger {
+			compatible = "nordic,npm1300-charger";
+			/* 4.2 V, matching the top of the fuel-gauge model's voltage axis
+			 * (battery_profile_*.inc param_2 runs 2.79 -> 4.2 V, so the model
+			 * calls 4.2 V "100%"). At the previous 4.15 V the cell was never
+			 * charged to what the gauge considers full, so SoC plateaued around
+			 * 95% and never reached 100% — the reported "stuck at 95%".
+			 *
+			 * This is the standard Li-Ion termination and gives full rated
+			 * capacity; the trade is shorter cycle life than a reduced-voltage
+			 * charge. Revisit alongside the pending nPM PowerUP characterisation
+			 * of the actual 300 mAh cell: if that model is generated against a
+			 * lower termination, this must move back to match it. */
+			term-microvolt = <4200000>;
+			/* JEITA warm-temperature termination — deliberately left lower. */
+			term-warm-microvolt = <4000000>;
+			current-microamp = <200000>;
+			dischg-limit-microamp = <1000000>;
+			vbus-limit-microamp = <500000>;
+			thermistor-ohms = <10000>;
+			thermistor-beta = <3380>;
+			charging-enable;
+		};
+
+		npm_pmic_leds: leds {
+			compatible = "nordic,npm1300-led";
+			nordic,led0-mode = "error";
+			nordic,led1-mode = "charging";
+			nordic,led2-mode = "host";
+		};
+	};
+
+	rtc_rv: rv@51 {
+		/* Zephyr in-tree RV-8263-C8 driver (CONFIG_RTC_RV8263). Replaced the
+		 * out-of-tree drivers/rtc copy in 2026-07; upstream implements the same
+		 * RTC API plus alarms/clkout and already handles the BCD year/month
+		 * conversion correctly. */
+		compatible = "microcrystal,rv-8263-c8";
+		reg = <0x51>;
+		zephyr,deferred-init;
+	};
+
+	bmi323: bmi323@68 {
+		compatible = "bosch,bmi323hpi";
+		reg = <0x68>;
+		status = "okay";
+		/* BMI323 INT1 is routed to nRF5340 P1.11 (schematic-confirmed). */
+		int-gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
+		zephyr,deferred-init;
+	};
+
+	chsc5816: chsc5816@2e {
+		status = "okay";
+		compatible = "chipsemi,chsc5816";
+		reg = <0x2e>;
+		irq-gpios = <&gpio0 26 (GPIO_ACTIVE_LOW)>;// | GPIO_PULL_UP)>;
+		rst-gpios = <&gpio0 27 (GPIO_ACTIVE_LOW)>;// | GPIO_PULL_UP)>;
+		zephyr,deferred-init;
+	};
+
+	max32664d: max32664d@55 {
+		compatible = "maxim,max32664";
+		reg = <0x55>;
+		reset-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+		mfio-gpios = <&gpio1 7 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+		zephyr,deferred-init;
+	};
+};
+
+&i2c2 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	pinctrl-0 = <&i2c2_default>;
+	pinctrl-1 = <&i2c2_sleep>;
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-names = "default", "sleep";
+	zephyr,concat-buf-size = <8250>;
+	zephyr,flash-buf-max-size = <8250>;
+
+	max32664c: max32664c@55 {
+		compatible = "protocentral,max32664c";
+		reg = <0x55>;
+		reset-gpios = <&gpio1 8 GPIO_ACTIVE_HIGH>;
+		mfio-gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+		zephyr,deferred-init;
+	};
+
+	max30208a50: max30208a50@50 {
+		compatible = "maxim,max30208";
+		status = "okay";
+		reg = <0x50>;
+		zephyr,deferred-init;
+	};
+
+	max30208a52: max30208a52@52 {
+		compatible = "maxim,max30208";
+		status = "okay";
+		reg = <0x52>;
+		zephyr,deferred-init;
+	};
+
+	/* AS6221 - temperature sensor on newer hardware revisions (older boards
+	 * populate a MAX30208 at 0x50/0x52 instead). hw_module.c probes MAX30208
+	 * first, then this, at boot and uses whichever is present. Handled by the
+	 * upstream TMP108 driver (ams,as6221 variant). */
+	as6221: as6221@48 {
+		compatible = "ams,as6221";
+		status = "okay";
+		reg = <0x48>;
+		zephyr,deferred-init;
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart0_default>;
+	pinctrl-1 = <&uart0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&pwm0 {
+	status = "disabled";
+	pinctrl-0 = <&pwm0_default>;
+	pinctrl-1 = <&pwm0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&uart1 {
+	status = "disabled";
+};
+
+&adc {
+	status = "disabled";
+};
+
+&qspi {
+	status = "okay";
+	pinctrl-0 = <&qspi_default>;
+	pinctrl-1 = <&qspi_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	w25q01jv: w25q01jveiq@0 {
+		compatible = "nordic,qspi-nor";
+		reg = <0>;
+		writeoc = "pp4o";
+		readoc = "read4io";
+		quad-enable-requirements = "S2B1v1";
+		address-size-32;
+		enter-4byte-addr = < 0xB7 >;
+		sck-frequency = <48000000>;
+		size = <1073741824>;	// In bits
+		has-dpd;
+		t-enter-dpd = <30000>;
+		t-exit-dpd = <30000>;
+		jedec-id = [ ef 40 21  ];
+		/* Flash Deep-Power-Down (zephyr,pm-device-runtime-auto + global
+		 * CONFIG_PM_DEVICE_RUNTIME) was reverted — the global runtime-PM flag
+		 * left the deferred touch controller suspended after boot. Revisit at
+		 * the measurement session (see app/prj.conf note). */
+		status = "okay";
+
+	};
+};
+
+&spi3 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+
+	pinctrl-0 = <&spi3_default>;
+	pinctrl-1 = <&spi3_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio1 10 GPIO_ACTIVE_LOW>;
+	clock-frequency = <DT_FREQ_M(4)>;
+
+	max30001: max30001@0 {
+		compatible = "maxim,max30001";
+		status = "okay";
+		reg = <0x0>;
+		spi-max-frequency = <DT_FREQ_M(4)>;
+		/* MAX30001 INTB (DRDY) confirmed routed to nRF5340 P1.09 (active low).
+		 * Enabled here so the pin is documented in DT; the driver does not yet
+		 * consume intb_gpio (still FIFO/status-polled) — trigger-driven reads
+		 * off this line are P3 (interrupt/RTIO acquisition) work. */
+		intb-gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
+		//rtor-enabled;
+		//ecg-enabled;
+		bioz-enabled;
+		ecg-gain = <1>; // 40 V/V gain
+		bioz-gain = <1>; // 20 V/V gain for GSR measurement
+		bioz_cgmag = <2>; // 16 uA excitation current for good GSR sensitivity
+		bioz_dlpf = <1>; // Digital low pass filter
+		bioz_dhpf = <1>; // Digital high pass filter 
+		bioz_ahpf = <2>; // Analog high pass filter
+		//ecg-invert;
+		ecg-dcloff-enable;
+		ecg-dcloff-current = <1>; // 5 nA
+		zephyr,deferred-init;
+	};
+};
+
+&spi4 {
+	compatible = "nordic,nrf-spim";
+	status = "okay";
+
+	pinctrl-0 = <&spi4_default>;
+	pinctrl-1 = <&spi4_sleep>;
+	pinctrl-names = "default", "sleep";
+	clock-frequency = <DT_FREQ_M(32)>;
+	cs-gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;    // For Device
+
+	sh8601: sh8601@0 {
+		compatible = "sitronix,sh8601";
+		spi-max-frequency = <DT_FREQ_M(33)>;
+		reg = <0>;
+		reset-gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
+		//<&gpio0 29 GPIO_ACTIVE_HIGH>;
+		width = <390>;
+		height = <390>;
+		pixel-format = <0>;
+		rotation = <0>;
+		status = "okay";
+	};
+};
+
+&ieee802154 {
+	status = "okay";
+};
+
+zephyr_udc0: &usbd {
+	compatible = "nordic,nrf-usbd";
+	status = "okay";
+	cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
+
+/* Include default memory partition configuration file */
+#include <nordic/nrf5340_cpuapp_partition.dtsi>
+
+/*
+ * Flash layout is owned by the Partition Manager (app/pm_static.yml), not by
+ * this file. The DTS partition block that lived here during the 3.4 rework was
+ * removed: Nordic documents nRF53 DFU with MCUboot in overwrite mode as the one
+ * configuration that still requires the Partition Manager (NCS migration guide
+ * 3.3, "the only exception that still requires the Partition Manager"), and
+ * without it MCUboot loses MCUBOOT_NRF53_MULTI_IMAGE_UPDATE — which is selected
+ * only from PM_EXTERNAL_FLASH_MCUBOOT_SECONDARY — and takes a net-core update
+ * path that cannot address an off-chip secondary slot.
+ */
