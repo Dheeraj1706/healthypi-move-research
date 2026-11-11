@@ -379,7 +379,7 @@ static void sensor_ppg_finger_decode(uint8_t *buf, uint32_t buf_len, uint8_t m_p
             {
                 ppg_sensor_sample.spo2_state = SPO2_MEAS_COMPUTATION;
             }
-            else if (atomic_get(&spo2_process_done) == 0)
+            else if (atomic_get(&spo2_process_done) == 0 && !hpi_research_continuous(HPR_FINGER))
             {
                 ppg_sensor_sample.spo2_state = SPO2_MEAS_SUCCESS;
                 LOG_INF("SpO2 Measurement Done");
@@ -911,7 +911,7 @@ static void st_ppg_fing_bpt_est_entry(void *o)
      * sensor, raw IR PPG streaming). Bracket it here and in the state exit — the
      * exit fires on every leave path (done / contact-timeout / cancel via
      * hpi_bpt_abort()->smf_set_state(IDLE)), so the record always finalizes. */
-    hpi_data_set_ppg_finger_record_active(true);
+    hpi_data_set_ppg_finger_record_active(!hpi_research_continuous(HPR_FINGER));
     // hpi_load_scr_spl(SCR_SPL_BPT_MEASURE, SCROLL_NONE, SCR_SPL_FI_SENS_CHECK, 0, 0, 0);
     // hpi_hw_fi_sensor_on();
     // hw_bpt_start_est();
@@ -1063,7 +1063,7 @@ static void st_ppg_fi_check_sensor_entry(void *o)
     // FIX: Use correct enum type (PPG_FI_OP_MODE_* not PPG_FI_STATE_*)
     if (s->ppg_fi_op_mode == PPG_FI_OP_MODE_SPO2_EST)
     {
-        hpi_load_scr_spl(SCR_SPL_FI_SENS_CHECK, SCROLL_NONE, SCR_SPO2, s->ppg_fi_op_mode, 0, 0);
+        if (!hpi_research_continuous(HPR_FINGER)) { hpi_load_scr_spl(SCR_SPL_FI_SENS_CHECK, SCROLL_NONE, SCR_SPO2, s->ppg_fi_op_mode, 0, 0); }
     }
     else
     {
@@ -1146,7 +1146,7 @@ static enum smf_state_result st_ppg_fi_check_sensor_run(void *o)
     }
     else if (s->ppg_fi_op_mode == PPG_FI_OP_MODE_SPO2_EST)
     {
-       hpi_load_scr_spl(SCR_SPL_SPO2_MEASURE, SCROLL_NONE, SCR_SPO2, SPO2_SOURCE_PPG_FI, 0, 0);
+       if (!hpi_research_continuous(HPR_FINGER)) { hpi_load_scr_spl(SCR_SPL_SPO2_MEASURE, SCROLL_NONE, SCR_SPO2, SPO2_SOURCE_PPG_FI, 0, 0); }
        smf_set_state(SMF_CTX(&sf_obj), &ppg_fi_states[PPG_FI_STATE_WAIT_FOR_CONTACT]);
     }
     else
@@ -1193,7 +1193,11 @@ static void st_ppg_fi_spo2_est_entry(void *o)
 static enum smf_state_result st_ppg_fi_spo2_est_run(void *o)
 {
     LOG_DBG("PPG Finger SM SpO2 Estimation Running");
-    if (atomic_get(&finger_contact_ok) == 0)
+    bool continuous = hpi_research_continuous(HPR_FINGER);
+    if (continuous) {
+        hpi_research_state(HPR_FINGER, atomic_get(&finger_contact_ok) ? HPR_MEASURING : HPR_WAITING);
+    }
+    if (!continuous && atomic_get(&finger_contact_ok) == 0)
     {
         if (contact_lost_start_ts == 0)
         {
@@ -1214,7 +1218,7 @@ static enum smf_state_result st_ppg_fi_spo2_est_run(void *o)
             contact_lost_start_ts = 0;
     }
     /* Check for completion */
-    if (k_sem_take(&sem_spo2_est_complete, K_NO_WAIT) == 0)
+    if (!continuous && k_sem_take(&sem_spo2_est_complete, K_NO_WAIT) == 0)
     {
         k_sem_give(&sem_stop_fi_sampling); // Stop the sampling
         k_sleep(K_MSEC(1000));             // Wait for the sampling to stop
@@ -1305,7 +1309,7 @@ static enum smf_state_result st_ppg_fi_wait_for_contact_run(void *o)
         return SMF_EVENT_HANDLED;
     }
  
-   if ((wait_start_ts != 0 && (k_uptime_get() - wait_start_ts) >= FINGER_SENSOR_CONTACT_TIMEOUT_MS)) {
+   if (!hpi_research_continuous(HPR_FINGER) && (wait_start_ts != 0 && (k_uptime_get() - wait_start_ts) >= FINGER_SENSOR_CONTACT_TIMEOUT_MS)) {
             LOG_INF("FINGER CONTACT TIMEOUT");
             hpi_bpt_abort();
             k_event_post(&fi_evt, EVT_FI_CONTACT_TIMEOUT);

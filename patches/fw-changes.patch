@@ -4,10 +4,10 @@
  VERSION_MAJOR = 3
  VERSION_MINOR = 1
 -PATCHLEVEL = 0
-+PATCHLEVEL = 1
++PATCHLEVEL = 2
  VERSION_TWEAK = 0
 -EXTRAVERSION =
-+EXTRAVERSION = ppg
++EXTRAVERSION = continuous
 --- a/app/src/ble_module.c
 +++ b/app/src/ble_module.c
 @@ -1,3 +1,4 @@
@@ -134,7 +134,7 @@
  
 --- /dev/null
 +++ b/app/src/hpi_research.c
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,315 @@
 +/* SPDX-License-Identifier: MIT
 + * Opt-in research service; legacy GATT payloads remain unchanged.
 + */
@@ -147,19 +147,20 @@
 +#include <errno.h>
 +#include <string.h>
 +#include "hpi_research.h"
++#include "hpi_research_policy.h"
 +#include "hpi_evt.h"
 +#include "hpi_dfu.h"
 +
 +#define UUID_RESEARCH(n) BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0xa17e0000 + (n), \
 +    0x4d52, 0x4f56, 0x9100, 0x524553454152))
 +
-+enum { CMD_START = 1, CMD_STOP = 2, CMD_STATUS = 3 };
++enum { CMD_START = 1, CMD_STOP = 2, CMD_STATUS = 3, CMD_CONTINUOUS = 4 };
 +enum { R_ACCEPTED, R_BUSY, R_INVALID, R_NOT_OWNER, R_UNSUPPORTED, R_DFU };
 +static atomic_t states[5];
 +static atomic_t indices[HPR_LAST_SIGNAL + 1];
-+static atomic_t remote_target;
-+static atomic_t terminal_target;
-+static atomic_t stop_target;
++static atomic_t remote_mask;
++static atomic_t continuous_mask;
++static atomic_t stop_mask;
 +static atomic_t finger_busy;
 +static atomic_t tx_failures;
 +static uint32_t boot_id;
@@ -167,7 +168,7 @@
 +static uint8_t status_bytes[HPR_STATUS_SIZE];
 +/* Only the control thread dereferences/changes owner. */
 +static struct bt_conn *owner;
-+static int64_t pending_since;
++static int64_t pending_since[5];
 +struct request { struct bt_conn *conn; uint8_t bytes[4]; };
 +K_MSGQ_DEFINE(hpr_commands, sizeof(struct request), 4, sizeof(void *));
 +struct scalar_packet { struct hpr_stamp stamp; int32_t value; uint8_t signal; };
@@ -179,31 +180,46 @@
 +           state == HPR_MEASURING || state == HPR_STOPPING;
 +}
 +
++bool hpi_research_continuous(uint8_t target)
++{
++    return target >= 1 && target <= 4 &&
++           (atomic_get(&continuous_mask) & BIT(target - 1));
++}
++
++bool hpi_research_stopping(uint8_t target)
++{
++    return target >= 1 && target <= 4 &&
++           (atomic_get(&stop_mask) & BIT(target - 1));
++}
++
 +void hpi_research_state(uint8_t target, uint8_t state)
 +{
 +    if (target < 1 || target > 4) { return; }
 +    uint8_t old = (uint8_t)atomic_get(&states[target]);
 +    if (state == HPR_IDLE && old >= HPR_COMPLETE && old <= HPR_ERROR) { return; }
 +    if (state == HPR_IDLE && active(old)) {
-+        state = atomic_get(&stop_target) == target ? HPR_CANCELLED : HPR_ERROR;
++        state = hpi_research_stopping(target) ? HPR_CANCELLED : HPR_ERROR;
 +    }
++    /* A late contact update must not erase a latched Stop. */
++    if (hpi_research_stopping(target) && active(state)) { state = HPR_STOPPING; }
 +    atomic_set(&states[target], state);
-+    if (!active(state) && atomic_cas(&remote_target, target, 0)) {
-+        atomic_set(&terminal_target, target);
-+        atomic_set(&stop_target, 0);
++    if (!active(state)) {
++        atomic_and(&remote_mask, ~BIT(target - 1));
++        atomic_and(&continuous_mask, ~BIT(target - 1));
++        atomic_and(&stop_mask, ~BIT(target - 1));
 +    }
 +}
 +
 +bool hpi_research_remote_owned(uint8_t target)
 +{
-+    return atomic_get(&remote_target) == target && active((uint8_t)atomic_get(&states[target]));
++    return target >= 1 && target <= 4 &&
++           (atomic_get(&remote_mask) & BIT(target - 1));
 +}
 +
 +bool hpi_research_local_allowed(uint8_t target)
 +{
 +    ARG_UNUSED(target);
-+    uint8_t owned = (uint8_t)atomic_get(&remote_target);
-+    return owned == 0 || !active((uint8_t)atomic_get(&states[owned]));
++    return atomic_get(&remote_mask) == 0;
 +}
 +
 +void hpi_research_finger_busy(bool busy) { atomic_set(&finger_busy, busy); }
@@ -246,7 +262,7 @@
 +    }
 +    if (len != 4) { return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN); }
 +    const uint8_t *b = buf;
-+    if (b[0] != HPR_VERSION || b[1] < CMD_START || b[1] > CMD_STATUS ||
++    if (b[0] != HPR_VERSION || b[1] < CMD_START || b[1] > CMD_CONTINUOUS ||
 +        b[2] > 4 || b[3] == 0 || (b[1] != CMD_STATUS && b[2] == 0)) {
 +        return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 +    }
@@ -279,7 +295,7 @@
 +    for (uint8_t i = 1; i <= 4; ++i) {
 +        if (active((uint8_t)atomic_get(&states[i]))) { b[6] |= BIT(i - 1); }
 +    }
-+    b[7] = HPR_FLAG_TIME_ESTIMATED;
++    b[7] = HPR_FLAG_TIME_ESTIMATED | HPR_CAP_CONTINUOUS;
 +    hpr_put32(b + 8, boot_id);
 +    hpr_put32(b + 12, k_uptime_get_32());
 +    hpr_put32(b + 16, (uint32_t)atomic_get(&tx_failures));
@@ -294,6 +310,8 @@
 +
 +static void post_request(uint8_t target, bool start)
 +{
++    /* Continuous ECG/BioZ is reconciled by its owning SMF thread. */
++    if (target <= HPR_GSR && hpi_research_continuous(target)) { return; }
 +    switch (target) {
 +    case HPR_ECG: k_event_post(&ecg_evt, start ? EVT_ECG_START : EVT_ECG_CANCEL); break;
 +    case HPR_GSR: k_event_post(&ecg_evt, start ? EVT_GSR_START : EVT_GSR_CANCEL); break;
@@ -308,28 +326,37 @@
 +    struct bt_conn_info info;
 +    if (bt_conn_get_info(req->conn, &info) || info.state != BT_CONN_STATE_CONNECTED ||
 +        bt_conn_get_security(req->conn) < BT_SECURITY_L2) { return; }
-+    if (hpi_dfu_is_active()) { result = R_DFU; }
-+    else if (opcode == CMD_START) {
-+        bool busy = atomic_get(&finger_busy) != 0;
-+        for (uint8_t i = 1; i <= 4; ++i) { busy |= active((uint8_t)atomic_get(&states[i])); }
++    if (hpi_dfu_is_active() && opcode != CMD_STOP && opcode != CMD_STATUS) { result = R_DFU; }
++    else if (opcode == CMD_START || opcode == CMD_CONTINUOUS) {
++        uint32_t mask = (uint32_t)atomic_get(&remote_mask);
++        uint8_t active_targets = 0;
++        /* Spot checks remain exclusive. Continuous targets can coexist with
++         * other continuous targets on this connection, never local spot/BP. */
++        for (uint8_t i = 1; i <= 4; ++i) {
++            if (active((uint8_t)atomic_get(&states[i]))) { active_targets |= BIT(i - 1); }
++        }
++        bool busy = hpr_start_busy(opcode == CMD_CONTINUOUS,
++            owner && owner != req->conn, mask, atomic_get(&continuous_mask),
++            active_targets, atomic_get(&finger_busy));
 +        if (owner == req->conn && hpi_research_remote_owned(target)) {
-+            /* Idempotent start: do not reset/restart an active measurement. */
++            if (hpi_research_stopping(target) ||
++                hpi_research_continuous(target) != (opcode == CMD_CONTINUOUS)) { result = R_BUSY; }
 +        } else if (busy) { result = R_BUSY; }
 +        else {
-+            if (owner) { bt_conn_unref(owner); }
-+            owner = bt_conn_ref(req->conn);
-+            atomic_set(&remote_target, target);
-+            atomic_set(&stop_target, 0);
++            if (!owner) { owner = bt_conn_ref(req->conn); }
++            atomic_or(&remote_mask, BIT(target - 1));
++            if (opcode == CMD_CONTINUOUS) { atomic_or(&continuous_mask, BIT(target - 1)); }
++            atomic_and(&stop_mask, ~BIT(target - 1));
 +            atomic_set(&states[target], HPR_STARTING);
-+            pending_since = k_uptime_get();
++            pending_since[target] = k_uptime_get();
 +            post_request(target, true);
 +        }
 +    } else if (opcode == CMD_STOP) {
-+        if (owner != req->conn || atomic_get(&remote_target) != target) { result = R_NOT_OWNER; }
-+        else if (active((uint8_t)atomic_get(&states[target]))) {
-+            atomic_set(&stop_target, target);
++        if (owner != req->conn || !hpi_research_remote_owned(target)) { result = R_NOT_OWNER; }
++        else {
++            atomic_or(&stop_mask, BIT(target - 1));
 +            atomic_set(&states[target], HPR_STOPPING);
-+            pending_since = k_uptime_get();
++            pending_since[target] = k_uptime_get();
 +            post_request(target, false);
 +        }
 +    }
@@ -349,39 +376,34 @@
 +        while (!k_msgq_get(&hpr_scalars, &scalar, K_NO_WAIT)) {
 +            hpi_research_send(scalar.signal, &scalar.stamp, &scalar.value, 1);
 +        }
-+        uint8_t target = (uint8_t)atomic_get(&remote_target);
-+        if (!target) {
-+            if (owner) {
-+                publish_status(owner, 0, 0, (uint8_t)atomic_get(&terminal_target), R_ACCEPTED);
-+                bt_conn_unref(owner); owner = NULL;
-+            }
-+            continue;
-+        }
-+        uint8_t state = (uint8_t)atomic_get(&states[target]);
-+        /* Keep cancellation latched across the sensor controller's startup
-+         * sleeps / stale-event clearing. One early Cancel can otherwise vanish. */
-+        if (atomic_get(&stop_target) == target && active(state)) {
-+            post_request(target, false);
-+        }
-+        if ((state == HPR_STARTING || state == HPR_STOPPING) &&
-+            k_uptime_get() - pending_since > 5000) {
-+            post_request(target, false);
-+            hpi_research_state(target, HPR_ERROR);
-+        }
++        bool disconnected = false;
 +        if (owner) {
 +            struct bt_conn_info info;
-+            if (bt_conn_get_info(owner, &info) || info.state != BT_CONN_STATE_CONNECTED) {
-+                /* Fail-safe cancellation, not automatic restart after reconnect. */
-+                if (active((uint8_t)atomic_get(&states[target]))) {
-+                    atomic_set(&stop_target, target);
-+                    atomic_set(&states[target], HPR_STOPPING);
-+                    pending_since = k_uptime_get();
-+                    post_request(target, false);
-+                }
-+                bt_conn_unref(owner); owner = NULL;
-+            } else {
-+                publish_status(owner, 0, 0, target, R_ACCEPTED); /* unsolicited status */
++            disconnected = bt_conn_get_info(owner, &info) || info.state != BT_CONN_STATE_CONNECTED;
++        }
++        for (uint8_t target = 1; target <= 4; ++target) {
++            if (!hpi_research_remote_owned(target)) {
++                if (owner && !disconnected) { publish_status(owner, 0, 0, target, R_ACCEPTED); }
++                continue;
 +            }
++            uint8_t state = (uint8_t)atomic_get(&states[target]);
++            if (disconnected || hpi_dfu_is_active() ||
++                (state == HPR_STARTING && k_uptime_get() - pending_since[target] > 5000)) {
++                atomic_or(&stop_mask, BIT(target - 1));
++                atomic_set(&states[target], HPR_STOPPING);
++            }
++            /* Keep Stop latched through controller startup sleeps/cleared events.
++             * Do not release ownership on a timer: actual teardown acknowledges it. */
++            if (hpi_research_stopping(target)) { post_request(target, false); }
++            if (owner && !disconnected) { publish_status(owner, 0, 0, target, R_ACCEPTED); }
++        }
++        if (owner && atomic_get(&remote_mask) == 0) {
++            if (!disconnected) {
++                for (uint8_t target = 1; target <= 4; ++target) {
++                    publish_status(owner, 0, 0, target, R_ACCEPTED);
++                }
++            }
++            bt_conn_unref(owner); owner = NULL;
 +        }
 +    }
 +}
@@ -430,7 +452,7 @@
 +SYS_INIT(research_init, APPLICATION, 80);
 --- /dev/null
 +++ b/app/src/hpi_research.h
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,22 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef HPI_RESEARCH_H
 +#define HPI_RESEARCH_H
@@ -447,13 +469,35 @@
 +void hpi_research_scalar(uint8_t signal, int32_t value);
 +/* Hooks report actual state-machine transitions, not merely accepted commands. */
 +void hpi_research_state(uint8_t target, uint8_t state);
++bool hpi_research_continuous(uint8_t target);
++bool hpi_research_stopping(uint8_t target);
 +bool hpi_research_remote_owned(uint8_t target);
 +bool hpi_research_local_allowed(uint8_t target);
 +void hpi_research_finger_busy(bool busy);
 +#endif
 --- /dev/null
++++ b/app/src/hpi_research_policy.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef HPI_RESEARCH_POLICY_H
++#define HPI_RESEARCH_POLICY_H
++#include <stdbool.h>
++#include <stdint.h>
++
++/* Admission for a NEW target. An already owned target is handled idempotently
++ * by the command handler. Bits 0..3 are ECG, BioZ, wrist and finger. */
++static inline bool hpr_start_busy(bool continuous, bool different_owner,
++                                  uint8_t remote, uint8_t continuous_targets,
++                                  uint8_t active_targets, bool finger_busy)
++{
++    return different_owner || (!continuous && remote) ||
++           remote != continuous_targets || (active_targets & ~remote) ||
++           (finger_busy && !(remote & 8));
++}
++#endif
+--- /dev/null
 +++ b/app/src/hpi_research_wire.h
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,87 @@
 +/* SPDX-License-Identifier: MIT */
 +#ifndef HPI_RESEARCH_WIRE_H
 +#define HPI_RESEARCH_WIRE_H
@@ -486,6 +530,8 @@
 +#define HPR_STOPPING 7
 +#define HPR_FLAG_TIME_ESTIMATED 1
 +#define HPR_FLAG_SIGNED 2
++/* Status flags only: firmware supports opcode 4 and concurrent continuous targets. */
++#define HPR_CAP_CONTINUOUS 2
 +
 +struct hpr_stamp {
 +    uint32_t first_index;
@@ -555,15 +601,44 @@
      struct hpi_gsr_status_t s = {
          .elapsed_s = (uint16_t)(GSR_MEASUREMENT_DURATION_S - remaining),
          .remaining_s = (uint16_t)remaining,
-@@ -566,6 +569,7 @@
+@@ -461,6 +464,8 @@
+ }
+ K_WORK_DEFINE(work_ecg_loff, work_ecg_loff_handler);
  
-         if (get_ecg_active() || get_gsr_active())
++static void sensor_bioz_only_process_decode(uint8_t *buf, uint32_t buf_len);
++
+ static void sensor_ecg_process_decode(uint8_t *buf, uint32_t buf_len)
+ {
+     // Input validation
+@@ -471,6 +476,8 @@
+     }
+ 
+     const struct max30001_encoded_data *edata = (const struct max30001_encoded_data *)buf;
++    /* A single FIFO read drains both channels: forward BioZ exactly once. */
++    if (get_gsr_active()) { sensor_bioz_only_process_decode(buf, buf_len); }
+     struct hpi_ecg_bioz_sensor_data_t ecg_sensor_sample;
+ 
+     uint8_t ecg_num_samples = edata->num_samples_ecg;
+@@ -564,8 +571,9 @@
+             // else: already in lead-on state, nothing to do
+         }
+ 
+-        if (get_ecg_active() || get_gsr_active())
++        if (get_ecg_active() && ecg_sensor_sample.ecg_num_samples)
          {
 +    hpi_research_stamp(HPR_ECG, &ecg_sensor_sample.research_stamp, ecg_sensor_sample.ecg_num_samples);
      int ret = k_msgq_put(&q_ecg_sample, &ecg_sensor_sample, K_NO_WAIT);
              if (ret != 0) {
                  LOG_WRN("ECG/GSR sample dropped - queue full (ret=%d)", ret);
-@@ -663,6 +667,7 @@
+@@ -636,6 +644,7 @@
+     sample.hr = edata->hr;
+     sample.rtor = edata->rri;
+     sample.ecg_lead_off = edata->ecg_lead_off;
++    sample.bioz_lead_off = edata->bioz_lead_off;
+ 
+ 
+   //  LOG_DBG("GSR sensor data: bioz_lead_off=%d", edata->bioz_lead_off);
+@@ -663,6 +672,7 @@
          for (int i = 0; i < sample.bioz_num_samples && i < BIOZ_POINTS_PER_SAMPLE; i++) {
              bsample.bioz_samples[i] = sample.bioz_sample[i];
          }
@@ -571,7 +646,40 @@
          int ret = k_msgq_put(&q_bioz_sample, &bsample, K_NO_WAIT);
          if (ret != 0) {
              LOG_WRN("BioZ sample dropped - bqueue full (ret=%d)", ret);
-@@ -901,6 +906,8 @@
+@@ -672,6 +682,7 @@
+ 
+ static void work_bioz_sample_handler(struct k_work *work)
+ {
++    if (get_ecg_active()) { return; }
+     uint8_t ecg_bioz_buf[512];
+     int ret;
+ 
+@@ -702,7 +713,7 @@
+ 
+ static void bioz_sampling_handler(struct k_timer *dummy)
+ {
+-    if (get_gsr_active()) {
++    if (get_gsr_active() && !get_ecg_active()) {
+         k_work_submit(&work_bioz_sample);
+     }
+ }
+@@ -863,6 +874,7 @@
+ 
+ void gsr_background_start(void)
+ {
++    if (hpi_research_remote_owned(HPR_ECG) || hpi_research_remote_owned(HPR_GSR)) { return; }
+     /* Already running? do nothing */
+     if (atomic_get(&g_gsr_bg_active)) {
+         return;
+@@ -882,6 +894,7 @@
+ 
+ void gsr_background_stop(void)
+ {
++    if (hpi_research_remote_owned(HPR_ECG) || hpi_research_remote_owned(HPR_GSR)) { return; }
+     /* Not running? do nothing */
+     if (!atomic_get(&g_gsr_bg_active)) {
+         return;
+@@ -901,6 +914,8 @@
  
  static void st_ecg_idle_entry(void *o)
  {
@@ -580,7 +688,7 @@
      int ret;
  
      LOG_INF("ECG SMF: Entering IDLE state");
-@@ -1152,6 +1159,7 @@
+@@ -1152,6 +1167,7 @@
   */
  static void st_ecg_wait_for_lead_entry(void *o)
  {
@@ -588,7 +696,7 @@
      int ret;
  
      LOG_INF("ECG SMF: Entering WAIT_FOR_LEAD state");
-@@ -1413,6 +1421,7 @@
+@@ -1413,6 +1429,7 @@
   */
  static void st_ecg_recording_entry(void *o)
  {
@@ -596,7 +704,7 @@
      int duration = ECG_RECORD_DURATION_S;
  
      LOG_INF("ECG SMF: Entering RECORDING state - %d seconds", duration);
-@@ -1515,6 +1524,7 @@
+@@ -1515,6 +1532,7 @@
  
      /* Latch before the branches below mutate the flag. */
      const bool success = !ecg_cancellation;
@@ -604,6 +712,62 @@
  
      ecg_complete_entry_ms = k_uptime_get_32();
  
+@@ -1611,6 +1629,46 @@
+     [HPI_ECG_STATE_GSR_COMPLETE]       = SMF_CREATE_STATE(NULL, st_gsr_complete_run, NULL, NULL, NULL),
+ };
+ 
++/* Research mode owns this thread while ECG and/or BioZ are continuous.
++ * It deliberately bypasses spot-check countdowns, record-size limits and lead
++ * placement timeouts. Contact is status, not an automatic end of acquisition.
++ * Never opens an unbounded watch flash record; these are live BLE streams. */
++static bool research_ecg_bioz_tick(void)
++{
++    bool ecg = hpi_research_continuous(HPR_ECG);
++    bool gsr = hpi_research_continuous(HPR_GSR);
++    if (!ecg && !gsr) { return false; }
++    k_event_clear(&ecg_evt, EVT_ECG_START | EVT_GSR_START | EVT_ECG_CANCEL |
++                  EVT_GSR_CANCEL | EVT_ECG_COMPLETE | EVT_GSR_COMPLETE);
++    for (uint8_t target = HPR_ECG; target <= HPR_GSR; ++target) {
++        if (!hpi_research_continuous(target)) { continue; }
++        bool enabled = target == HPR_ECG ? get_ecg_active() : get_gsr_active();
++        if (hpi_research_stopping(target)) {
++            int ret = target == HPR_ECG ? hw_max30001_ecg_disable() : hw_max30001_gsr_disable();
++            if (ret == 0) {
++                if (target == HPR_ECG) { k_timer_stop(&tmr_ecg_sampling); }
++                else { k_timer_stop(&tmr_bioz_sampling); }
++                hpi_research_state(target, HPR_CANCELLED);
++            }
++        } else {
++            int ret = enabled ? 0 : (target == HPR_ECG ? hw_max30001_ecg_enable() : hw_max30001_gsr_enable());
++            if (ret != 0) {
++                /* Attempt teardown; leave ownership latched if it fails. */
++                int off = target == HPR_ECG ? hw_max30001_ecg_disable() : hw_max30001_gsr_disable();
++                if (off == 0) { hpi_research_state(target, HPR_ERROR); }
++                continue;
++            }
++            if (!enabled) {
++                if (target == HPR_ECG) { ecg_start_sampling(); }
++                else { bioz_start_sampling(); }
++            }
++            bool contact = target == HPR_ECG ? !get_ecg_lead_on_off() : !get_gsr_lead_on_off();
++            hpi_research_state(target, contact ? HPR_MEASURING : HPR_WAITING);
++        }
++    }
++    return true;
++}
++
+ void smf_ecg_thread(void)
+ {
+     int ret;
+@@ -1658,7 +1716,7 @@
+             wdt_ch = hpi_watchdog_register("smf_ecg", 10000);
+         }
+ 
+-        ret = smf_run_state(SMF_CTX(&s_ecg_obj));
++        ret = research_ecg_bioz_tick() ? 0 : smf_run_state(SMF_CTX(&s_ecg_obj));
+         if (ret != 0)
+         {
+             LOG_ERR("SMF Run error: %d", ret);
 --- a/app/src/sm/smf_ppg_finger.c
 +++ b/app/src/sm/smf_ppg_finger.c
 @@ -1,3 +1,4 @@
@@ -611,6 +775,15 @@
  /*
   * HealthyPi Move
   * 
+@@ -378,7 +379,7 @@
+             {
+                 ppg_sensor_sample.spo2_state = SPO2_MEAS_COMPUTATION;
+             }
+-            else if (atomic_get(&spo2_process_done) == 0)
++            else if (atomic_get(&spo2_process_done) == 0 && !hpi_research_continuous(HPR_FINGER))
+             {
+                 ppg_sensor_sample.spo2_state = SPO2_MEAS_SUCCESS;
+                 LOG_INF("SpO2 Measurement Done");
 @@ -398,6 +399,7 @@
              }
          }
@@ -660,7 +833,16 @@
          LOG_INF("sem_bpt_cal_start received in CAL_WAIT state - starting calibration");
          // Turn off timeout
         // k_timer_stop(&tmr_bpt_cal_timeout);
-@@ -1047,6 +1055,8 @@
+@@ -903,7 +911,7 @@
+      * sensor, raw IR PPG streaming). Bracket it here and in the state exit — the
+      * exit fires on every leave path (done / contact-timeout / cancel via
+      * hpi_bpt_abort()->smf_set_state(IDLE)), so the record always finalizes. */
+-    hpi_data_set_ppg_finger_record_active(true);
++    hpi_data_set_ppg_finger_record_active(!hpi_research_continuous(HPR_FINGER));
+     // hpi_load_scr_spl(SCR_SPL_BPT_MEASURE, SCROLL_NONE, SCR_SPL_FI_SENS_CHECK, 0, 0, 0);
+     // hpi_hw_fi_sensor_on();
+     // hw_bpt_start_est();
+@@ -1047,13 +1055,15 @@
  
  static void st_ppg_fi_check_sensor_entry(void *o)
  {
@@ -669,6 +851,23 @@
      struct s_ppg_fi_object *s = (struct s_ppg_fi_object *)o;
      LOG_DBG("PPG Finger SM Check Sensor Entry, op_mode=%d", s->ppg_fi_op_mode);
  
+     // FIX: Use correct enum type (PPG_FI_OP_MODE_* not PPG_FI_STATE_*)
+     if (s->ppg_fi_op_mode == PPG_FI_OP_MODE_SPO2_EST)
+     {
+-        hpi_load_scr_spl(SCR_SPL_FI_SENS_CHECK, SCROLL_NONE, SCR_SPO2, s->ppg_fi_op_mode, 0, 0);
++        if (!hpi_research_continuous(HPR_FINGER)) { hpi_load_scr_spl(SCR_SPL_FI_SENS_CHECK, SCROLL_NONE, SCR_SPO2, s->ppg_fi_op_mode, 0, 0); }
+     }
+     else
+     {
+@@ -1136,7 +1146,7 @@
+     }
+     else if (s->ppg_fi_op_mode == PPG_FI_OP_MODE_SPO2_EST)
+     {
+-       hpi_load_scr_spl(SCR_SPL_SPO2_MEASURE, SCROLL_NONE, SCR_SPO2, SPO2_SOURCE_PPG_FI, 0, 0);
++       if (!hpi_research_continuous(HPR_FINGER)) { hpi_load_scr_spl(SCR_SPL_SPO2_MEASURE, SCROLL_NONE, SCR_SPO2, SPO2_SOURCE_PPG_FI, 0, 0); }
+        smf_set_state(SMF_CTX(&sf_obj), &ppg_fi_states[PPG_FI_STATE_WAIT_FOR_CONTACT]);
+     }
+     else
 @@ -1150,6 +1160,7 @@
  
  static void st_ppg_fi_sensor_fail_entry(void *o)
@@ -685,7 +884,29 @@
      LOG_DBG("PPG Finger SM SpO2 Estimation Entry");
      sens_decode_ppg_fi_op_mode = PPG_FI_OP_MODE_SPO2_EST;
      atomic_set(&spo2_process_done, 0);  // Reset completion flag for new measurement
-@@ -1229,6 +1241,7 @@
+@@ -1181,7 +1193,11 @@
+ static enum smf_state_result st_ppg_fi_spo2_est_run(void *o)
+ {
+     LOG_DBG("PPG Finger SM SpO2 Estimation Running");
+-    if (atomic_get(&finger_contact_ok) == 0)
++    bool continuous = hpi_research_continuous(HPR_FINGER);
++    if (continuous) {
++        hpi_research_state(HPR_FINGER, atomic_get(&finger_contact_ok) ? HPR_MEASURING : HPR_WAITING);
++    }
++    if (!continuous && atomic_get(&finger_contact_ok) == 0)
+     {
+         if (contact_lost_start_ts == 0)
+         {
+@@ -1202,7 +1218,7 @@
+             contact_lost_start_ts = 0;
+     }
+     /* Check for completion */
+-    if (k_sem_take(&sem_spo2_est_complete, K_NO_WAIT) == 0)
++    if (!continuous && k_sem_take(&sem_spo2_est_complete, K_NO_WAIT) == 0)
+     {
+         k_sem_give(&sem_stop_fi_sampling); // Stop the sampling
+         k_sleep(K_MSEC(1000));             // Wait for the sampling to stop
+@@ -1229,6 +1245,7 @@
  
  static void st_ppg_fi_spo2_est_done_entry(void *o)
  {
@@ -693,7 +914,7 @@
      LOG_DBG("PPG Finger SM SpO2 Estimation Done Entry");
      hpi_load_scr_spl(SCR_SPL_SPO2_RESULT, SCROLL_NONE, SCR_SPO2, HPI_SPO2_RESULT_SUCCESS, m_est_spo2, 0);
      hpi_hw_fi_sensor_off();
-@@ -1244,6 +1257,7 @@
+@@ -1244,6 +1261,7 @@
  
  static void st_ppg_fi_wait_for_contact_entry(void *o)
  {
@@ -701,7 +922,16 @@
      struct s_ppg_fi_object *s = (struct s_ppg_fi_object *)o;
      LOG_DBG("PPG Finger SM Wait for Contact Entry");
      wait_start_ts = k_uptime_get();
-@@ -1406,4 +1420,4 @@
+@@ -1291,7 +1309,7 @@
+         return SMF_EVENT_HANDLED;
+     }
+  
+-   if ((wait_start_ts != 0 && (k_uptime_get() - wait_start_ts) >= FINGER_SENSOR_CONTACT_TIMEOUT_MS)) {
++   if (!hpi_research_continuous(HPR_FINGER) && (wait_start_ts != 0 && (k_uptime_get() - wait_start_ts) >= FINGER_SENSOR_CONTACT_TIMEOUT_MS)) {
+             LOG_INF("FINGER CONTACT TIMEOUT");
+             hpi_bpt_abort();
+             k_event_post(&fi_evt, EVT_FI_CONTACT_TIMEOUT);
+@@ -1406,4 +1424,4 @@
  #define PPG_FI_CTRL_THREAD_PRIORITY 7
  
  K_THREAD_DEFINE(ppg_finger_smf_thread, SMF_PPG_FINGER_THREAD_STACKSIZE, smf_ppg_finger_thread, NULL, NULL, NULL, SMF_PPG_FINGER_THREAD_PRIORITY, 0, 500);
@@ -715,7 +945,79 @@
  /*
   * HealthyPi Move
   *
-@@ -468,6 +469,7 @@
+@@ -148,6 +149,8 @@
+  * (on completion/timeout), read by both of those plus the SMF state-entry fns.
+  * atomic for cross-thread visibility, same as m_curr_state. */
+ static atomic_t spo2_measurement_in_progress = ATOMIC_INIT(0);
++static atomic_t research_restore_requested;
++K_MUTEX_DEFINE(wr_research_mutex);
+ static enum max32664c_scd_states m_curr_scd_state;
+ 
+ // Externs
+@@ -235,17 +238,25 @@
+ 
+ void work_probe_enable_handler(struct k_work *work)
+ {
++    k_mutex_lock(&wr_research_mutex, K_FOREVER);
++    if (!hpi_research_continuous(HPR_WRIST)) {
+     probing_algorithm_enabled = false;
+     wr_stop_algo();
+     k_event_post(&ppg_wr_events, EVT_PROBE_TIMEOUT);
++    }
++    k_mutex_unlock(&wr_research_mutex);
+ }
+ K_WORK_DELAYABLE_DEFINE(work_probe_enable, work_probe_enable_handler);
+ 
+ void work_probe_sleep_handler(struct k_work *work)
+ {
++    k_mutex_lock(&wr_research_mutex, K_FOREVER);
++    if (!hpi_research_continuous(HPR_WRIST)) {
+     probing_algorithm_enabled = true;
+     wr_set_op_mode(MAX32664C_OP_MODE_SCD, MAX32664C_ALGO_MODE_CONT_HRM);
+     k_work_schedule(&work_probe_enable, K_SECONDS(PROBE_ENABLE_WAIT_S));
++    }
++    k_mutex_unlock(&wr_research_mutex);
+ }
+ K_WORK_DELAYABLE_DEFINE(work_probe_sleep, work_probe_sleep_handler);
+ 
+@@ -408,7 +419,7 @@
+                 }
+             }
+ 
+-            if ((ppg_sensor_sample.spo2_valid_percent_complete == 100) && atomic_get(&spo2_measurement_in_progress))
++            if ((ppg_sensor_sample.spo2_valid_percent_complete == 100) && atomic_get(&spo2_measurement_in_progress) && !hpi_research_continuous(HPR_WRIST))
+             {
+                 k_event_post(&spo2_evt, EVT_SPO2_STOP);
+                 if (ppg_sensor_sample.spo2_confidence > 50)
+@@ -434,7 +445,7 @@
+                 }
+                 atomic_set(&spo2_measurement_in_progress, 0);
+             }
+-            else if (atomic_get(&spo2_measurement_in_progress))
++            else if (atomic_get(&spo2_measurement_in_progress) && !hpi_research_continuous(HPR_WRIST))
+             {
+                 LOG_INF("Spo2 : %d | Confidence : %d | Progress : %d | SCD : %d | Low PI : %d",
+                    ppg_sensor_sample.spo2,
+@@ -444,7 +455,7 @@
+                    ppg_sensor_sample.spo2_low_pi);
+             }
+ 
+-            if (ppg_sensor_sample.spo2_state == SPO2_MEAS_TIMEOUT)
++            if (ppg_sensor_sample.spo2_state == SPO2_MEAS_TIMEOUT && !hpi_research_continuous(HPR_WRIST))
+             {
+                 k_event_post(&spo2_evt, EVT_SPO2_STOP);
+                 set_measured_spo2(0, SPO2_MEAS_TIMEOUT);
+@@ -452,6 +463,9 @@
+             }
+ 
+             m_curr_scd_state = ppg_sensor_sample.scd_state;
++            if (hpi_research_continuous(HPR_WRIST)) {
++                hpi_research_state(HPR_WRIST, ppg_sensor_sample.scd_state == MAX32664C_SCD_STATE_OFF_SKIN ? HPR_WAITING : HPR_MEASURING);
++            }
+             /* Forward raw PPG samples whenever the hub is not *positively* off-skin.
+              *
+              * Previously this gated on SCD == ON_SKIN (the fully-locked state). On a
+@@ -468,6 +482,7 @@
               * which keeps true off-skin noise out of BLE streaming and recording. */
              if (ppg_sensor_sample.scd_state != MAX32664C_SCD_STATE_OFF_SKIN)
              {
@@ -723,7 +1025,118 @@
                  if (k_msgq_put(&q_ppg_wrist_sample, &ppg_sensor_sample, K_MSEC(1)) != 0)
                  {
                      static uint32_t wr_drops = 0;
-@@ -904,6 +906,7 @@
+@@ -571,7 +586,7 @@
+     if (atomic_get(&spo2_measurement_in_progress))
+     {
+         LOG_INF("Spo2 ACTIVE -> staying in Spo2 algo");
+-        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2);
++        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, (hpi_research_continuous(HPR_WRIST) ? MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2 : MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2));
+         return;
+     }
+     atomic_set(&m_curr_state, PPG_SAMP_STATE_ACTIVE);
+@@ -622,7 +637,7 @@
+     if (atomic_get(&spo2_measurement_in_progress))
+     {
+         LOG_INF("Spo2 ACTIVE -> staying in Spo2 algo");
+-        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2);
++        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, (hpi_research_continuous(HPR_WRIST) ? MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2 : MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2));
+         return;
+     }
+     atomic_set(&m_curr_state, PPG_SAMP_STATE_PROBING);
+@@ -704,7 +719,7 @@
+     if (atomic_get(&spo2_measurement_in_progress))
+     {
+         LOG_INF("Spo2 ACTIVE -> staying in Spo2 algo");
+-        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2);
++        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, (hpi_research_continuous(HPR_WRIST) ? MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2 : MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2));
+         return;
+     }
+     atomic_set(&m_curr_state, PPG_SAMP_STATE_OFF_SKIN);
+@@ -840,7 +855,21 @@
+             wdt_ch_ppg_wr = hpi_watchdog_register("smf_ppg_wrist", 10000);
+         }
+ 
++        k_mutex_lock(&wr_research_mutex, K_FOREVER);
++        if (atomic_get(&research_restore_requested)) {
++            /* Only this SMF thread may mutate its own state context. */
++            smf_set_state(SMF_CTX(&sm_ctx_ppg_wr), &ppg_samp_states[PPG_SAMP_STATE_ACTIVE]);
++            atomic_set(&research_restore_requested, 0);
++            hpi_research_state(HPR_WRIST, HPR_CANCELLED);
++        }
++        if (hpi_research_continuous(HPR_WRIST)) {
++            k_mutex_unlock(&wr_research_mutex);
++            hpi_watchdog_feed(wdt_ch_ppg_wr);
++            k_msleep(PPG_WR_HOUSEKEEP_MS);
++            continue;
++        }
+         ret = smf_run_state(SMF_CTX(&sm_ctx_ppg_wr));
++        k_mutex_unlock(&wr_research_mutex);
+ 
+         if (ret)
+         {
+@@ -851,6 +880,44 @@
+          * inbox (k_event_wait with PPG_WR_HOUSEKEEP_MS timeout), which paces
+          * the loop and feeds the watchdog. */
+     }
++}
++
++/* Continuous research mode uses the hub's continuous HR + SpO2 mode.
++ * It neither restarts spot checks nor stops on a completed SpO2 estimate. */
++static bool research_wrist_tick(void)
++{
++    static bool running;
++    if (!hpi_research_continuous(HPR_WRIST)) { return false; }
++    k_event_clear(&spo2_evt, EVT_SPO2_START | EVT_SPO2_STOP | EVT_SPO2_CANCEL);
++    if (hpi_research_stopping(HPR_WRIST)) {
++        if (atomic_get(&research_restore_requested)) { return true; }
++        k_timer_stop(&tmr_ppg_wrist_sampling);
++        if (wr_set_op_mode(MAX32664C_OP_MODE_STOP_ALGO, MAX32664C_ALGO_MODE_NONE)) { return true; }
++        atomic_set(&spo2_measurement_in_progress, 0);
++        running = false;
++        /* Let the SMF thread restore normal operation and acknowledge. */
++        atomic_set(&research_restore_requested, 1);
++    } else if (!running) {
++        k_work_cancel_delayable(&work_off_skin_threshold);
++        k_work_cancel_delayable(&work_probe_enable);
++        k_work_cancel_delayable(&work_probe_sleep);
++        k_work_cancel_delayable(&work_offskin_timeout);
++        k_timer_stop(&tmr_ppg_wrist_sampling);
++        int ret = wr_set_op_mode(MAX32664C_OP_MODE_STOP_ALGO, MAX32664C_ALGO_MODE_NONE);
++        if (!ret) { ret = wr_set_op_mode(MAX32664C_OP_MODE_EXIT_WAKE_ON_MOTION, MAX32664C_ALGO_MODE_NONE); }
++        if (!ret) { ret = wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2); }
++        if (ret) {
++            if (!wr_set_op_mode(MAX32664C_OP_MODE_STOP_ALGO, MAX32664C_ALGO_MODE_NONE)) {
++                hpi_research_state(HPR_WRIST, HPR_ERROR);
++            }
++        } else {
++            running = true;
++            atomic_set(&spo2_measurement_in_progress, 1);
++            hpi_research_state(HPR_WRIST, HPR_WAITING);
++            k_timer_start(&tmr_ppg_wrist_sampling, K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS), K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS));
++        }
++    }
++    return true;
+ }
+ 
+ static void ppg_wrist_ctrl_thread(void)
+@@ -873,6 +940,10 @@
+         }
+         hpi_watchdog_feed(wdt_ch_ppg_ctrl);
+ 
++        k_mutex_lock(&wr_research_mutex, K_FOREVER);
++        bool research = research_wrist_tick();
++        k_mutex_unlock(&wr_research_mutex);
++        if (research) { continue; }
+         bool start_req = hpi_evt_consume(&spo2_evt, EVT_SPO2_START);
+         if (start_req)
+         {
+@@ -899,18 +970,19 @@
+ 
+             wr_set_op_mode(MAX32664C_OP_MODE_STOP_ALGO, MAX32664C_ALGO_MODE_NONE);
+             k_msleep(600);
+-            wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2);
++            wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, (hpi_research_continuous(HPR_WRIST) ? MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2 : MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2));
+             k_msleep(600);
              k_timer_start(&tmr_ppg_wrist_sampling, K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS), K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS));
  
              atomic_set(&spo2_measurement_in_progress, 1);
@@ -731,7 +1144,18 @@
              /* H-REC: bracket the wrist SpO2 spot-check. Completion/timeout post
               * EVT_SPO2_STOP (handled below) and user cancel posts EVT_SPO2_CANCEL,
               * so every teardown path funnels through the two handlers below. */
-@@ -920,6 +923,7 @@
+-            hpi_data_set_ppg_wrist_record_active(true);
+-        }
+-
+-        if (!start_req && hpi_evt_consume(&spo2_evt, EVT_SPO2_STOP))
++            hpi_data_set_ppg_wrist_record_active(!hpi_research_continuous(HPR_WRIST));
++        }
++
++        if (!start_req && hpi_evt_consume(&spo2_evt, EVT_SPO2_STOP) && !hpi_research_continuous(HPR_WRIST))
+         {
+             LOG_DBG("Stopping One Shot SpO2");
+             k_timer_stop(&tmr_ppg_wrist_sampling);
+@@ -920,6 +992,7 @@
              uint16_t m_est_spo2 = 0;
              enum spo2_meas_state m_est_spo2_status = SPO2_MEAS_UNK;
              get_measured_spo2(&m_est_spo2, &m_est_spo2_status);
@@ -739,15 +1163,15 @@
              if (m_est_spo2_status == SPO2_MEAS_SUCCESS)
              {
                  LOG_DBG("SPO2 Measurement Successful: %d", m_est_spo2);
-@@ -950,6 +954,7 @@
-             if (atomic_get(&spo2_measurement_in_progress))
-             {
-                 LOG_DBG("Cancelling One Shot SpO2 (user initiated)");
+@@ -962,6 +1035,7 @@
+                 wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HRM);
+                 k_msleep(600);
+                 k_timer_start(&tmr_ppg_wrist_sampling, K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS), K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS));
 +                hpi_research_state(HPR_WRIST, HPR_CANCELLED);
-                 k_timer_stop(&tmr_ppg_wrist_sampling);
-                 atomic_set(&spo2_measurement_in_progress, 0);
-                 hpi_data_set_ppg_wrist_record_active(false);   // H-REC: finalize capture
-@@ -976,4 +981,4 @@
+             }
+         }
+         /* No trailing k_msleep: the k_event_wait at the top of the loop blocks
+@@ -976,4 +1050,4 @@
  #define SMF_PPG_THREAD_PRIORITY 7
  
  K_THREAD_DEFINE(smf_ppg_thread_id, SMF_PPG_THREAD_STACKSIZE, smf_ppg_wrist_thread, NULL, NULL, NULL, SMF_PPG_THREAD_PRIORITY, 0, 1000);
@@ -846,6 +1270,93 @@
  
      if (hpi_spo2_source_get() == SPO2_SOURCE_PPG_FI) {
 --- /dev/null
++++ b/docs/CONTINUOUS_RESEARCH.md
+@@ -0,0 +1,84 @@
++# Continuous research acquisition — 3.1.2-continuous
++
++This version adds phone-controlled continuous ECG, GSR/BioZ, wrist PPG and
++finger PPG, with independent targets and concurrent operation in the firmware.
++The Android companion is HealthyPi Move PPG 3.0.10+98.
++
++The source and host tests support concurrent acquisition; simultaneous signal
++quality, sensor-hub behavior, power consumption and 3–5 hour reliability have
++not been validated on a physical watch. This is an experimental research build.
++
++## Commands and compatibility
++
++The encrypted research service UUIDs and data packet layout remain unchanged.
++Control still uses four bytes `[1, opcode, target, request_id]`, written with
++response. Target 1=ECG, 2=GSR/BioZ, 3=wrist PPG group, 4=finger PPG group.
++
++- Opcode **4** starts a continuous target. Targets can coexist on the owning
++  connection; starting an already active continuous target is idempotent.
++- Opcode **2** requests Stop for that target. Stop one leaves the others active.
++- Opcodes 1 (finite spot measurement) and 3 (query status) retain their meaning.
++  Finite spot measurements remain exclusive.
++- Status flag bit 1 (`0x02`) advertises continuous/concurrent control support.
++  Bit 0 still denotes estimated time. These are status flags, separate from
++  the data packet's signed-sample flag at bit 1.
++- The app checks this capability before sending opcode 4. Older firmware can
++  show existing waveforms but cannot use the new continuous controls.
++
++A write acknowledgement only means queued. Match status request ID, opcode,
++target and result; inspect the actual state and active mask afterward. Stop is
++latched until sensor teardown reports a terminal state. Startup timeout requests
++cancellation; it does not release ownership based only on elapsed time.
++Disconnect and firmware update request cancellation of all remotely owned
++targets. Reconnection does not automatically restart them. Watch spot-measurement
++Start actions are blocked while the remote session owns targets.
++
++## Acquisition paths
++
++- **Wrist:** selects the existing MAX32664C
++  `MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2` (0x00), rather than repeatedly
++  restarting a one-shot SpO2 estimate. SpO2 completion/timeout no longer ends
++  this research acquisition. The power-saving SMF and scheduled probe work
++  cannot overwrite continuous mode. Stop restores the normal wrist state on
++  the wrist SMF's own thread. Wrist green/red/IR samples retain IDs 3/9/10.
++  Raw samples are still suppressed when the hub positively reports off-skin.
++- **ECG + GSR:** the MAX30001's separate ECG/BioZ enable bits are reconciled by
++  the ECG SMF thread independently. The research path bypasses the spot-check
++  30-second countdown, fixed record limit and lead-placement timeout. Contact
++  loss reports waiting; it does not end the session. When ECG is active, its
++  one FIFO read forwards both ECG and BioZ, so GSR samples are not silently
++  discarded. The polling fallback never runs a second BioZ reader alongside
++  ECG. Adding/removing one channel avoids resetting the other channel's FIFO.
++  FIFO empty/invalid entries are excluded from transmitted sample counts.
++- **Finger:** retains the existing sensor+algorithm acquisition used by finger
++  SpO2, while suppressing the application's stop on the first successful
++  estimate and its contact-loss abort. It keeps sampling until Stop. Missing
++  finger hardware still has a detection timeout. Red/IR retain IDs 11/4.
++  Whether the installed hub itself continues delivering beyond its first
++  estimate must be checked on the physical sensor.
++
++No unbounded watch flash records are opened by these continuous paths. They
++stream over BLE. The phone Live screen buffers plots and counts samples; this
++change does **not** add persistent mobile recording/export or background Android
++service support. Keep the app in the foreground on Live. Leaving Live requests
++Stop. Chart selection and comparison do not restart acquisition.
++
++Device times remain estimated FIFO-read-based uptime, not hardware-synchronized
++ADC timestamps. Counters identify observable gaps after a baseline, not every
++upstream loss. Data rates in the UI are nominal. GSR retains this checkout's
++raw BioZ ADC integers; no new conductance conversion is introduced.
++
++## Physical validation still required
++
++Install the matching APK and OTA ZIP, reconnect and accept pairing. On Live,
++start each target individually and confirm more than 30 seconds of fresh samples.
++Then Start all, inspect all seven channels via the channel selector/Compare,
++stop ECG while checking GSR and PPG continue, and repeat with each target.
++Test contact removal/restoration, missing finger hardware, Stop during startup,
++disconnect cancellation and reconnection without automatic restart.
++
++Only after short checks pass should a long run be assessed. Use a recorder that
++subscribes to the research service if storage is needed; the existing laptop
++legacy recorder does not acquire every extra channel automatically. Record
++duration, per-channel sample counts/gaps, boot changes, battery/temperature and
++any resets. Host tests and a compiled ZIP do not establish 3–5 hour reliability.
+--- /dev/null
 +++ b/docs/RESEARCH_PPG.md
 @@ -0,0 +1,70 @@
 +# Additional live PPG channels
@@ -918,9 +1429,170 @@
 +response and values in each mode, compare indices across channels, then record
 +long enough to measure throughput and gaps. Also confirm original phone-app
 +streaming and measurement controls still behave correctly.
+--- a/drivers/sensor/max30001/max30001.c
++++ b/drivers/sensor/max30001/max30001.c
+@@ -508,12 +508,14 @@
+             if (ret != 0) {
+                 return ret;
+             }
+-            max30001_fifo_reset(dev);
+-            max30001_synch(dev);
++            if (!data->chip_cfg.reg_cnfg_gen.bit.en_bioz) {
++                max30001_fifo_reset(dev);
++                max30001_synch(dev);
++            }
+         }
+         else if (val->val1 == 0)
+         {
+-            max30001_fifo_reset(dev);
++            if (!data->chip_cfg.reg_cnfg_gen.bit.en_bioz) { max30001_fifo_reset(dev); }
+             int ret = max30001_enable_ecg(dev, false);
+             if (ret != 0) {
+                 return ret;
+@@ -527,12 +529,14 @@
+             if (ret != 0) {
+                 return ret;
+             }
+-            max30001_fifo_reset(dev);
+-            max30001_synch(dev);
++            if (!data->chip_cfg.reg_cnfg_gen.bit.en_ecg) {
++                max30001_fifo_reset(dev);
++                max30001_synch(dev);
++            }
+         }
+         else if (val->val1 == 0)
+         {
+-            max30001_fifo_reset(dev);
++            if (!data->chip_cfg.reg_cnfg_gen.bit.en_ecg) { max30001_fifo_reset(dev); }
+             int ret = max30001_enable_bioz(dev, false);
+             if (ret != 0) {
+                 return ret;
+--- a/drivers/sensor/max30001/max30001_async.c
++++ b/drivers/sensor/max30001/max30001_async.c
+@@ -34,6 +34,8 @@
+     struct max30001_data *data = dev->data;
+     const struct max30001_config *config = dev->config;
+ 
++    *num_samples_ecg = 0;
++    *num_samples_bioz = 0;
+     uint32_t max30001_status, max30001_mngr_int = 0;
+     uint32_t e_fifo_num_bytes, b_fifo_num_bytes;
+ 
+@@ -98,27 +100,30 @@
+         {
+             e_fifo_num_samples = 16;
+         }
+-        *num_samples_ecg = e_fifo_num_samples;
++        e_fifo_num_bytes = e_fifo_num_samples * 3;
++        *num_samples_ecg = 0;
+ 
+         //_max30001_read_ecg_fifo(dev, e_fifo_num_bytes);
+ 
+         struct spi_buf rx_ecg_buf[2] = {{.buf = NULL, .len = 1}, {.buf = &buf_ecg, .len = (e_fifo_num_bytes)}}; // 24 bit register + 1 dummy byte
+         const struct spi_buf_set rx_ecg = {.buffers = rx_ecg_buf, .count = 2};
+ 
+-        spi_transceive_dt(&config->spi, &tx_ecg, &rx_ecg);
++        if (spi_transceive_dt(&config->spi, &tx_ecg, &rx_ecg)) { return -EIO; }
+ 
+         // Also read BioZ FIFO when ECG is active
+         if (max30001_mngr_int == 0) {
+             max30001_mngr_int = max30001_read_reg(dev, MNGR_INT);
+         }
+-        b_fifo_num_samples = (((max30001_mngr_int & MAX30001_INT_MASK_BFIT) >> MAX30001_INT_SHIFT_BFIT) + 1);
++        b_fifo_num_samples = data->chip_cfg.reg_cnfg_gen.bit.en_bioz &&
++            (max30001_status & MAX30001_STATUS_MASK_BINT) ?
++            MIN(32U, (((max30001_mngr_int & MAX30001_INT_MASK_BFIT) >> MAX30001_INT_SHIFT_BFIT) + 1)) : 0;
+         b_fifo_num_bytes = (b_fifo_num_samples * 3);
+-        *num_samples_bioz = b_fifo_num_samples;
++        *num_samples_bioz = 0;
+ 
+         struct spi_buf rx_bioz_buf[2] = {{.buf = NULL, .len = 1}, {.buf = &buf_bioz, .len = b_fifo_num_bytes}}; // 24 bit register
+         const struct spi_buf_set rx_bioz = {.buffers = rx_bioz_buf, .count = 2};
+ 
+-        spi_transceive_dt(&config->spi, &tx_bioz, &rx_bioz);
++        if (b_fifo_num_samples && spi_transceive_dt(&config->spi, &tx_bioz, &rx_bioz)) { return -EIO; }
+ 
+         // Read all the samples from the FIFO
+         for (int i = 0; i < e_fifo_num_samples; i++)
+@@ -135,7 +140,7 @@
+                 int32_t secgtemp = (int32_t)uecgtemp;
+                 secgtemp = (int32_t)secgtemp >> 6;
+ 
+-                ecg_samples[i] = (int32_t)(secgtemp); //((secgtemp*1000*1000)/2621440);   // Convert to microvolts
++                ecg_samples[(*num_samples_ecg)++] = (int32_t)(secgtemp); //((secgtemp*1000*1000)/2621440);   // Convert to microvolts
+                 // printf("%d ", ecg_samples[i]);
+             }
+             else if (etag == 0x06)
+@@ -180,7 +185,7 @@
+                 //                                                config->bioz_gain,
+                 //                                                config->bioz_cgmag);
+                 // bioz_samples[i] = (int32_t)(conductance_uS * 100.0f);
+-                bioz_samples[i] = s_bioz_temp; // Store raw ADC value directly, conversion can be done in application layer for flexibility
++                bioz_samples[(*num_samples_bioz)++] = s_bioz_temp; // Store raw ADC value directly, conversion can be done in application layer for flexibility
+             }
+             else if (btag == 0x06) /* FIFO empty */
+             {
+@@ -223,19 +228,21 @@
+         *num_samples_ecg = 0;
+         
+         // Read BioZ FIFO
+-        b_fifo_num_samples = (((max30001_mngr_int & MAX30001_INT_MASK_BFIT) >> MAX30001_INT_SHIFT_BFIT) + 1);
++        b_fifo_num_samples = data->chip_cfg.reg_cnfg_gen.bit.en_bioz &&
++            (max30001_status & MAX30001_STATUS_MASK_BINT) ?
++            MIN(32U, (((max30001_mngr_int & MAX30001_INT_MASK_BFIT) >> MAX30001_INT_SHIFT_BFIT) + 1)) : 0;
+         b_fifo_num_bytes = (b_fifo_num_samples * 3);
+-        *num_samples_bioz = b_fifo_num_samples;
++        *num_samples_bioz = 0;
+         
+         if (b_fifo_num_samples > 32) {
+             b_fifo_num_samples = 32;
+-            *num_samples_bioz = 32;
++            b_fifo_num_bytes = b_fifo_num_samples * 3;
+         }
+ 
+         struct spi_buf rx_bioz_buf[2] = {{.buf = NULL, .len = 1}, {.buf = &buf_bioz, .len = b_fifo_num_bytes}};
+         const struct spi_buf_set rx_bioz = {.buffers = rx_bioz_buf, .count = 2};
+ 
+-        spi_transceive_dt(&config->spi, &tx_bioz, &rx_bioz);
++        if (b_fifo_num_samples && spi_transceive_dt(&config->spi, &tx_bioz, &rx_bioz)) { return -EIO; }
+ 
+         /*
+          * BioZ FIFO format (24 bits per sample):
+@@ -269,7 +276,7 @@
+                 //                                             config->bioz_cgmag);       //passing index 1 for the cgmag value of 110nA (low current mode) since that's the mode we're using in the driver                                      
+                 // LOG_INF("BioZ sample %d: raw ADC=%d, conductance=%.4f uS", i, s_bioz_temp, (double)conductance_uS);
+                 // bioz_samples[i] = (int32_t)(conductance_uS * 100.0f);
+-                bioz_samples[i] = s_bioz_temp; // Store raw ADC value directly, conversion can be done in application layer for flexibility
++                bioz_samples[(*num_samples_bioz)++] = s_bioz_temp; // Store raw ADC value directly, conversion can be done in application layer for flexibility
+             }
+             else if (btag == 0x06) /* FIFO empty */
+             {
+--- /dev/null
++++ b/tests/research_protocol/control_test.c
+@@ -0,0 +1,20 @@
++#include <assert.h>
++#include "hpi_research_policy.h"
++
++int main(void)
++{
++    /* Each successive continuous target is admissible, including ECG+BioZ. */
++    for (unsigned mask = 0; mask < 16; ++mask) {
++        assert(!hpr_start_busy(true, false, mask, mask, mask, !!(mask & 8)));
++        if (mask) assert(hpr_start_busy(false, false, mask, mask, mask, false));
++        assert(hpr_start_busy(true, true, mask, mask, mask, false));
++    }
++    /* Local spot checks, BP and remotely owned finite checks stay exclusive. */
++    assert(hpr_start_busy(true, false, 0, 0, 1, false));
++    assert(hpr_start_busy(true, false, 0, 0, 0, true));
++    assert(hpr_start_busy(true, false, 1, 0, 1, false));
++    assert(hpr_start_busy(true, false, 3, 3, 7, false));
++    /* Stopping one target leaves the remaining continuous targets admissible. */
++    assert(!hpr_start_busy(true, false, 14, 14, 14, true));
++    return 0;
++}
 --- /dev/null
 +++ b/tests/research_protocol/test_protocol.py
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,85 @@
 +"""Run: python -m unittest discover -s fw/tests/research_protocol -p test_protocol.py -v"""
 +from pathlib import Path
 +import struct
@@ -939,6 +1611,7 @@
 +    def test_commands(self):
 +        self.assertEqual(command("start", "ecg", 7), bytes([1, 1, 1, 7]))
 +        self.assertEqual(command("stop", "finger_spo2", 8), bytes([1, 2, 4, 8]))
++        self.assertEqual(command("continuous", "gsr", 9), bytes([1, 4, 2, 9]))
 +        with self.assertRaises(ValueError): command("start", 0)
 +        with self.assertRaises(ValueError): command("status", 0, 0)
 +
@@ -967,6 +1640,11 @@
 +        status = decode_status(struct.pack("<8BIII", 1, 7, 1, 1, 0, 2, 1, 1, 42, 999, 0))
 +        self.assertEqual(status["state"], "waiting_for_contact")
 +        self.assertEqual(status["request_id"], 7)
++
++    def test_continuous_capability_and_simultaneous_mask(self):
++        status = decode_status(struct.pack("<8BIII", 1, 9, 4, 2, 0, 3, 15, 3, 42, 999, 0))
++        self.assertTrue(status["continuous_supported"])
++        self.assertEqual(status["active_mask"], 15)
 +
 +    def test_additional_ppg_channels(self):
 +        for signal, name, hz in ((9, "ppg_wrist_red", 25),
@@ -1113,7 +1791,7 @@
 +
 +
 +def command(action, target=0, request_id=1):
-+    opcode = {"start": 1, "stop": 2, "status": 3}[action]
++    opcode = {"start": 1, "stop": 2, "status": 3, "continuous": 4}[action]
 +    target = TARGETS[target] if isinstance(target, str) else target
 +    if target not in range(5) or (opcode != 3 and target == 0):
 +        raise ValueError("Invalid measurement target")
@@ -1131,7 +1809,7 @@
 +        raise ValueError("Invalid status fields")
 +    return dict(version=version, request_id=rid, opcode=opcode, target=target,
 +                result=RESULTS[result], state=STATES[state], active_mask=mask,
-+                flags=flags, boot_id=boot, uptime_ms=uptime, tx_failures=failures)
++                flags=flags, continuous_supported=bool(flags & 2), boot_id=boot, uptime_ms=uptime, tx_failures=failures)
 +
 +
 +def decode_data(payload):

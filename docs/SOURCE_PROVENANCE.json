@@ -3,11 +3,12 @@
     "app": {
       "upstream": "https://github.com/Protocentral/healthypi_move_flutter.git",
       "base_commit": "c58ff7a1f9a2fdd1d69be83f07bbf2fc079f90d5",
-      "files": 256,
+      "files": 260,
       "changed_files": [
         "analysis_options.yaml",
         "android/app/build.gradle.kts",
         "android/app/src/main/AndroidManifest.xml",
+        "docs/CONTINUOUS_LIVE.md",
         "docs/RESEARCH_PPG_LIVE.md",
         "lib/ble/research_packet.dart",
         "lib/models/live_signal.dart",
@@ -16,17 +17,20 @@
         "lib/ui/charts/hpi_sweep_waveform.dart",
         "lib/utils/connection_manager.dart",
         "lib/utils/live_stream_controller.dart",
+        "lib/utils/research_session_controller.dart",
         "pubspec.lock",
         "pubspec.yaml",
+        "test/continuous_screen_test.dart",
         "test/live_screen_test.dart",
         "test/live_stream_controller_test.dart",
-        "test/research_packet_test.dart"
+        "test/research_packet_test.dart",
+        "test/research_session_controller_test.dart"
       ]
     },
     "fw": {
       "upstream": "https://github.com/Protocentral/healthypi-move-fw.git",
       "base_commit": "874f1347a6ec649cd9eef8bafb9d396d5806ca1e",
-      "files": 302,
+      "files": 305,
       "changed_files": [
         "app/VERSION",
         "app/src/ble_module.c",
@@ -34,6 +38,7 @@
         "app/src/hpi_common_types.h",
         "app/src/hpi_research.c",
         "app/src/hpi_research.h",
+        "app/src/hpi_research_policy.h",
         "app/src/hpi_research_wire.h",
         "app/src/sm/smf_ecg_bioz.c",
         "app/src/sm/smf_ppg_finger.c",
@@ -43,7 +48,11 @@
         "app/src/ui/screens/scr_eda_monitor.c",
         "app/src/ui/screens/scr_spo2_monitor.c",
         "app/src/ui/screens/scr_spo2_result.c",
+        "docs/CONTINUOUS_RESEARCH.md",
         "docs/RESEARCH_PPG.md",
+        "drivers/sensor/max30001/max30001.c",
+        "drivers/sensor/max30001/max30001_async.c",
+        "tests/research_protocol/control_test.c",
         "tests/research_protocol/test_protocol.py",
         "tests/research_protocol/wire_test.c",
         "tools/build_research.py",
@@ -390,6 +399,13 @@
       "bytes": 9707,
       "workspace_sha256": "04d8c3665a66a15def0fdcea27266bb46fb041fa75134f88cdc5bff0fdbcc045",
       "workspace_bytes": 9887
+    },
+    {
+      "path": "app/docs/CONTINUOUS_LIVE.md",
+      "sha256": "2986b7785efcc3edfe61c25f8a0f323525c21638a5709ab9e3047eff1a024661",
+      "bytes": 1808,
+      "workspace_sha256": "2986b7785efcc3edfe61c25f8a0f323525c21638a5709ab9e3047eff1a024661",
+      "workspace_bytes": 1808
     },
     {
       "path": "app/docs/FIRMWARE_HANDOFF_V3_BETA.md",
@@ -960,10 +976,10 @@
     },
     {
       "path": "app/lib/screens/scr_live.dart",
-      "sha256": "7d48593653e0f3c5df82fe8acf3cbc71673710cb7225f1cd317e4592de996b9e",
-      "bytes": 13561,
-      "workspace_sha256": "7d48593653e0f3c5df82fe8acf3cbc71673710cb7225f1cd317e4592de996b9e",
-      "workspace_bytes": 13561
+      "sha256": "199815308de5ed4ea7054d5b948753a0eba3c0eb508d9a64aec1776380b9da22",
+      "bytes": 20746,
+      "workspace_sha256": "199815308de5ed4ea7054d5b948753a0eba3c0eb508d9a64aec1776380b9da22",
+      "workspace_bytes": 20746
     },
     {
       "path": "app/lib/screens/scr_main_shell.dart",
@@ -1212,10 +1228,10 @@
     },
     {
       "path": "app/lib/utils/live_stream_controller.dart",
-      "sha256": "df66c8029397509a3fce4fd6b77bb6813c2baae105b69c5eb2d5203eb48d33d6",
-      "bytes": 7280,
-      "workspace_sha256": "de9e2911f3dd117ff30426cf2ad04bfef36632f31235e51c5cc2cdfa150b4c47",
-      "workspace_bytes": 7495
+      "sha256": "039745f5576880ff981f9fca28ae9afdba6888a612195767cb4f6e94cb27bb90",
+      "bytes": 7982,
+      "workspace_sha256": "da680527e8b3858b3302e06deaf84bd93058cd33f42c0c2bb4ccc910aedb0683",
+      "workspace_bytes": 8224
     },
     {
       "path": "app/lib/utils/manifest.dart",
@@ -1230,6 +1246,13 @@
       "bytes": 1817,
       "workspace_sha256": "41b90c0b1ab88b10aa2cd2882a3e6060b0963cf30d170d49e39250350e294885",
       "workspace_bytes": 1868
+    },
+    {
+      "path": "app/lib/utils/research_session_controller.dart",
+      "sha256": "33b662d1e331b0893400943a73e02db7d8ae368c10825a4f0421d31ae38157c4",
+      "bytes": 9317,
+      "workspace_sha256": "33b662d1e331b0893400943a73e02db7d8ae368c10825a4f0421d31ae38157c4",
+      "workspace_bytes": 9317
     },
     {
       "path": "app/lib/utils/signal_view.dart",
@@ -1277,22 +1300,22 @@
       "path": "app/linux/flutter/generated_plugin_registrant.cc",
       "sha256": "be4702057f167b6f2c3fedb9a5d36cde7870c7370867018dcbc6e28cc9c6622c",
       "bytes": 713,
-      "workspace_sha256": "52649c59a02796353f87c5b78d73d8a5df813e69ed56e5a830330c016b51b901",
-      "workspace_bytes": 732
+      "workspace_sha256": "be4702057f167b6f2c3fedb9a5d36cde7870c7370867018dcbc6e28cc9c6622c",
+      "workspace_bytes": 713
     },
     {
       "path": "app/linux/flutter/generated_plugin_registrant.h",
       "sha256": "00f93bb5b1faefdede8f6065df327522900fb0b8efee86bacf424fd947ed14bb",
       "bytes": 303,
-      "workspace_sha256": "3e4cf762b2bb67328e807ada539ead7bfc68cf7203d15f54267c519c94735099",
-      "workspace_bytes": 318
+      "workspace_sha256": "00f93bb5b1faefdede8f6065df327522900fb0b8efee86bacf424fd947ed14bb",
+      "workspace_bytes": 303
     },
     {
       "path": "app/linux/flutter/generated_plugins.cmake",
       "sha256": "1864dde07aa197f4818fa052f0588a6cb7e8324c66e3e8aee24400d463b7a3d4",
       "bytes": 782,
-      "workspace_sha256": "473f1327f20258522a07d4c74a3638b9272b2c4f140c508c167d521a68c739bb",
-      "workspace_bytes": 807
+      "workspace_sha256": "1864dde07aa197f4818fa052f0588a6cb7e8324c66e3e8aee24400d463b7a3d4",
+      "workspace_bytes": 782
     },
     {
       "path": "app/linux/runner/CMakeLists.txt",
@@ -1347,8 +1370,8 @@
       "path": "app/macos/Flutter/GeneratedPluginRegistrant.swift",
       "sha256": "4ce52a14d71ca38856cff5815206b27292f7241d8f72ef63012b0bee71be8e35",
       "bytes": 1197,
-      "workspace_sha256": "c2d8c47d04b83c6745ae929f062b3d7a2a7be2b05c5de3349e206065dfa93e32",
-      "workspace_bytes": 1225
+      "workspace_sha256": "4ce52a14d71ca38856cff5815206b27292f7241d8f72ef63012b0bee71be8e35",
+      "workspace_bytes": 1197
     },
     {
       "path": "app/macos/Podfile",
@@ -1541,10 +1564,10 @@
     },
     {
       "path": "app/pubspec.yaml",
-      "sha256": "0a8472faf5303205a7f898f9338ac697a2f4156b22354a6eba0fbb79956033cf",
-      "bytes": 3063,
-      "workspace_sha256": "614d5200e8f00721fbc50860d6cc2faa3f00a78b99facf0a09fb94a2472759cb",
-      "workspace_bytes": 3165
+      "sha256": "e3e5a623056156216535efef8591a523e4c8bb2a24a387cc7f42d985b540c359",
+      "bytes": 3064,
+      "workspace_sha256": "e3e5a623056156216535efef8591a523e4c8bb2a24a387cc7f42d985b540c359",
+      "workspace_bytes": 3064
     },
     {
       "path": "app/test/auto_sync_policy_test.dart",
@@ -1559,6 +1582,13 @@
       "bytes": 4603,
       "workspace_sha256": "9c72916141202d53f607de5e284fe38b8ec17cce7fe813bf15e71942462d64b1",
       "workspace_bytes": 4754
+    },
+    {
+      "path": "app/test/continuous_screen_test.dart",
+      "sha256": "b9bc6fa24b72482ab2e99a0ed75d47c997c6f1fd4a7861fa933996ac709f75e2",
+      "bytes": 2547,
+      "workspace_sha256": "b9bc6fa24b72482ab2e99a0ed75d47c997c6f1fd4a7861fa933996ac709f75e2",
+      "workspace_bytes": 2547
     },
     {
       "path": "app/test/device_info_test.dart",
@@ -1618,9 +1648,9 @@
     },
     {
       "path": "app/test/live_stream_controller_test.dart",
-      "sha256": "892aa7bd45ea10af73e3dc41ef86a5544e567dea95eb570314126ce56909a2d0",
+      "sha256": "20160149712e7c15ac2787cbaa76316ee9501d332c1c04e7bf5ec359db9cfcce",
       "bytes": 5381,
-      "workspace_sha256": "892aa7bd45ea10af73e3dc41ef86a5544e567dea95eb570314126ce56909a2d0",
+      "workspace_sha256": "20160149712e7c15ac2787cbaa76316ee9501d332c1c04e7bf5ec359db9cfcce",
       "workspace_bytes": 5381
     },
     {
@@ -1650,6 +1680,13 @@
       "bytes": 2987,
       "workspace_sha256": "732f9dad31aef47974a1eced969ea4ce04a125e7a17fe4d382e02476360bfbee",
       "workspace_bytes": 2987
+    },
+    {
+      "path": "app/test/research_session_controller_test.dart",
+      "sha256": "db3542fbe9570f809afbd713a3d660e981eaac673d5d2f2dec61d3ec412a3fcd",
+      "bytes": 5263,
+      "workspace_sha256": "db3542fbe9570f809afbd713a3d660e981eaac673d5d2f2dec61d3ec412a3fcd",
+      "workspace_bytes": 5263
     },
     {
       "path": "app/test/signal_view_test.dart",
@@ -1760,22 +1797,22 @@
       "path": "app/windows/flutter/generated_plugin_registrant.cc",
       "sha256": "30c0c181483cab3a545bea355f02ffd8d4cc30354131c768cf52d59f79408155",
       "bytes": 832,
-      "workspace_sha256": "ca40d2ca9a12aa763aa24144e8cebe07c4fc1d246894e286b7cefa8d57afb64e",
-      "workspace_bytes": 855
+      "workspace_sha256": "30c0c181483cab3a545bea355f02ffd8d4cc30354131c768cf52d59f79408155",
+      "workspace_bytes": 832
     },
     {
       "path": "app/windows/flutter/generated_plugin_registrant.h",
       "sha256": "dbc11635d7b1ba1887adf40df5b83d634e9c3ab0bee34510c71528bb4d73602a",
       "bytes": 302,
-      "workspace_sha256": "bac28d0d2535578bf27db13b937aa03e7790f98619a322914624c1c4e7cdcc6b",
-      "workspace_bytes": 317
+      "workspace_sha256": "dbc11635d7b1ba1887adf40df5b83d634e9c3ab0bee34510c71528bb4d73602a",
+      "workspace_bytes": 302
     },
     {
       "path": "app/windows/flutter/generated_plugins.cmake",
       "sha256": "64de6b16d1f1035796f00d870ca3777ed16821df9e8515352d5e05d31b2664cb",
       "bytes": 819,
-      "workspace_sha256": "895fb307212c5c103417de61c19627554ad4d270461d3a54909e5923ec08cb7a",
-      "workspace_bytes": 846
+      "workspace_sha256": "64de6b16d1f1035796f00d870ca3777ed16821df9e8515352d5e05d31b2664cb",
+      "workspace_bytes": 819
     },
     {
       "path": "app/windows/runner/CMakeLists.txt",
@@ -1860,6 +1897,34 @@
       "bytes": 3522,
       "workspace_sha256": "d154cf89ba85f820631a9b5bedacbe64fc5815e428fe6bc5da579ce649f69841",
       "workspace_bytes": 3624
+    },
+    {
+      "path": "docs/BLE_SPEC.md",
+      "sha256": "3b01f0e60cb79ed0adb8a361d6f414c1ed2781e1c1fa3b62d2ea17336525a08a",
+      "bytes": 6865,
+      "workspace_sha256": "3b01f0e60cb79ed0adb8a361d6f414c1ed2781e1c1fa3b62d2ea17336525a08a",
+      "workspace_bytes": 6865
+    },
+    {
+      "path": "docs/S2_S3_S4_IMPLEMENTATION.md",
+      "sha256": "a68310061b956b4e80ab380d8246f551af86ec876b67eedd5731ca46bb99dfde",
+      "bytes": 6782,
+      "workspace_sha256": "a68310061b956b4e80ab380d8246f551af86ec876b67eedd5731ca46bb99dfde",
+      "workspace_bytes": 6782
+    },
+    {
+      "path": "docs/builds/app_build_report.json",
+      "sha256": "29006e0aad8ae8ef123f88197034450ba88c059fb18859fea02895354472fb0a",
+      "bytes": 1416,
+      "workspace_sha256": "e072c7ed1c7a16cbf296168efa61b8480b5cfa462ed1729975d0e1e9d4723540",
+      "workspace_bytes": 1446
+    },
+    {
+      "path": "docs/builds/firmware_build_report.json",
+      "sha256": "57644971819aa8cc53e66220fb662f7628b5aaca45c24bd4657a3f481125e701",
+      "bytes": 1088,
+      "workspace_sha256": "fa191d3f725cfaf2d0dec6c37d06492d47fa57e1ff59bc913dfd0a5bd670e6e5",
+      "workspace_bytes": 1121
     },
     {
       "path": "fw/.github/workflows/build.yml",
@@ -2024,10 +2089,10 @@
     },
     {
       "path": "fw/app/VERSION",
-      "sha256": "b30baa729523b46a8ab2c168eec9e0677e5412fe567173cadf3ac1114a72d0cd",
-      "bytes": 88,
-      "workspace_sha256": "e1b272e46742157ac15c20d2d9add0b1548106fe129addc44ff4c775866ba6f9",
-      "workspace_bytes": 93
+      "sha256": "8667a7db1488324aad5144b17d8d4c1fbaa280d69a4415e037d409901945d352",
+      "bytes": 95,
+      "workspace_sha256": "8667a7db1488324aad5144b17d8d4c1fbaa280d69a4415e037d409901945d352",
+      "workspace_bytes": 95
     },
     {
       "path": "fw/app/app.overlay",
@@ -2311,24 +2376,31 @@
     },
     {
       "path": "fw/app/src/hpi_research.c",
-      "sha256": "588b3b4e0d52d81b0a36d3ddc8ad7865696ee3d930693e9bfee8e9df85edd714",
-      "bytes": 12526,
-      "workspace_sha256": "588b3b4e0d52d81b0a36d3ddc8ad7865696ee3d930693e9bfee8e9df85edd714",
-      "workspace_bytes": 12526
+      "sha256": "3a692720a4661ba562628f92ca3c5c0d3a9ec2672d0cf82ecc4e68d58a71fd1e",
+      "bytes": 13640,
+      "workspace_sha256": "3a692720a4661ba562628f92ca3c5c0d3a9ec2672d0cf82ecc4e68d58a71fd1e",
+      "workspace_bytes": 13640
     },
     {
       "path": "fw/app/src/hpi_research.h",
-      "sha256": "39ac71f871d7de74f9573e06c02cae3fad4f90a467c9940e398baec052fd954d",
-      "bytes": 949,
-      "workspace_sha256": "39ac71f871d7de74f9573e06c02cae3fad4f90a467c9940e398baec052fd954d",
-      "workspace_bytes": 949
+      "sha256": "e7e5eddf20bcaf638f3724eb0f499f96ff83c3b0440791d30c6b6307148da466",
+      "bytes": 1039,
+      "workspace_sha256": "e7e5eddf20bcaf638f3724eb0f499f96ff83c3b0440791d30c6b6307148da466",
+      "workspace_bytes": 1039
+    },
+    {
+      "path": "fw/app/src/hpi_research_policy.h",
+      "sha256": "fd357b72fa0c481e30e1f2e91f058f2e98c6ce1104dbb5e2aa607f12e3ca2480",
+      "bytes": 700,
+      "workspace_sha256": "fd357b72fa0c481e30e1f2e91f058f2e98c6ce1104dbb5e2aa607f12e3ca2480",
+      "workspace_bytes": 700
     },
     {
       "path": "fw/app/src/hpi_research_wire.h",
-      "sha256": "ee0e23611168b8eb301d3a8320b4d2edf3136f6cdb2eb35391310606ab15c028",
-      "bytes": 2833,
-      "workspace_sha256": "ee0e23611168b8eb301d3a8320b4d2edf3136f6cdb2eb35391310606ab15c028",
-      "workspace_bytes": 2833
+      "sha256": "f59273e3638fe7b5294f1a6d68583d0b4b1468a76eb64e0a348ae01c4f944794",
+      "bytes": 2949,
+      "workspace_sha256": "f59273e3638fe7b5294f1a6d68583d0b4b1468a76eb64e0a348ae01c4f944794",
+      "workspace_bytes": 2949
     },
     {
       "path": "fw/app/src/hpi_settings_store.c",
@@ -2514,10 +2586,10 @@
     },
     {
       "path": "fw/app/src/sm/smf_ecg_bioz.c",
-      "sha256": "4be88c1578471862f5be65b16f6186444ee7875d2a105c68b494d8c403fed5d6",
-      "bytes": 60460,
-      "workspace_sha256": "ea5eaf00c90b941b210c9118bdd17e0f5c1d2a8dc6501c23f0076a563ac0286d",
-      "workspace_bytes": 62149
+      "sha256": "dd13a30643edeb5ffebcc7be218dba371f25c0626b42a507746006de21bc92e7",
+      "bytes": 63074,
+      "workspace_sha256": "dd13a30643edeb5ffebcc7be218dba371f25c0626b42a507746006de21bc92e7",
+      "workspace_bytes": 63074
     },
     {
       "path": "fw/app/src/sm/smf_ecg_bioz.h",
@@ -2528,17 +2600,17 @@
     },
     {
       "path": "fw/app/src/sm/smf_ppg_finger.c",
-      "sha256": "decd1f06fd5fc85b2dbe5052624b0c19c6ff5a6fb470079a3e15054165cb7817",
-      "bytes": 55660,
-      "workspace_sha256": "9c44c050b9a26f1afadbcbae9207be46f4f39bac2a7a56e14cdde16f892d3466",
-      "workspace_bytes": 57083
+      "sha256": "0ea98a1a73c9a69fa4ceb5e6cebcd603bb9f6d0b1e5369ef516e9ad9688bd531",
+      "bytes": 56083,
+      "workspace_sha256": "0ea98a1a73c9a69fa4ceb5e6cebcd603bb9f6d0b1e5369ef516e9ad9688bd531",
+      "workspace_bytes": 56083
     },
     {
       "path": "fw/app/src/sm/smf_ppg_wrist.c",
-      "sha256": "b6d15d098cbdc262895792df98f0f6599e927eb8337149fa25bf6c35a1444478",
-      "bytes": 39582,
-      "workspace_sha256": "63d2cfa4467f6c91c005230a21571288d1f7def5627843975693464c1bb6dad9",
-      "workspace_bytes": 40566
+      "sha256": "30b2f50fe834a03b6f7af2203ff3b6ff9ef46f94ce2a107ddc63ccefb9a709a8",
+      "bytes": 43429,
+      "workspace_sha256": "30b2f50fe834a03b6f7af2203ff3b6ff9ef46f94ce2a107ddc63ccefb9a709a8",
+      "workspace_bytes": 43429
     },
     {
       "path": "fw/app/src/ui/components/hpi_r0_widgets.c",
@@ -3493,6 +3565,13 @@
       "workspace_bytes": 367
     },
     {
+      "path": "fw/docs/CONTINUOUS_RESEARCH.md",
+      "sha256": "a0c2126697be6882037e2d51948ec0855a3ec7ba4efcd4e23d4924c3eb3979d6",
+      "bytes": 5151,
+      "workspace_sha256": "a0c2126697be6882037e2d51948ec0855a3ec7ba4efcd4e23d4924c3eb3979d6",
+      "workspace_bytes": 5151
+    },
+    {
       "path": "fw/docs/H6_ADVANCED_METRICS.md",
       "sha256": "1e20d3732b4f68a3439d31ff3f44e6c8ceb084c7ab9cc1f8220f37be62262500",
       "bytes": 5305,
@@ -3676,10 +3755,10 @@
     },
     {
       "path": "fw/drivers/sensor/max30001/max30001.c",
-      "sha256": "a924ee883f2416246d3733a8672c8e122e975237d302960f177c2c10b63680ce",
-      "bytes": 32731,
-      "workspace_sha256": "f151bf031d71da6cba01c36b0e64436c8b77fa341e91814800bd99a094c667c8",
-      "workspace_bytes": 33680
+      "sha256": "5509c466bbf2f96a3ce4bd8b0105fb1beedeba01358fc556db3ce28af884bb74",
+      "bytes": 32993,
+      "workspace_sha256": "5509c466bbf2f96a3ce4bd8b0105fb1beedeba01358fc556db3ce28af884bb74",
+      "workspace_bytes": 32993
     },
     {
       "path": "fw/drivers/sensor/max30001/max30001.h",
@@ -3690,10 +3769,10 @@
     },
     {
       "path": "fw/drivers/sensor/max30001/max30001_async.c",
-      "sha256": "92d58353e328f97c19afb35b12238b8cc702dd54c19bda64265964820a8d42d9",
-      "bytes": 14545,
-      "workspace_sha256": "686647e83c8c4eed6a1323a10746e17605dda0c3b6122f4e9e20d27bb05994a3",
-      "workspace_bytes": 14929
+      "sha256": "9aa5c580a65f28f4248efe7422a5290e7b0015e8a376ff36acb7f5b88bb6fe23",
+      "bytes": 15041,
+      "workspace_sha256": "9aa5c580a65f28f4248efe7422a5290e7b0015e8a376ff36acb7f5b88bb6fe23",
+      "workspace_bytes": 15041
     },
     {
       "path": "fw/drivers/sensor/max30001/max30001_decoder.c",
@@ -3927,11 +4006,18 @@
       "workspace_bytes": 636
     },
     {
+      "path": "fw/tests/research_protocol/control_test.c",
+      "sha256": "6a6a8116f47c9a89a880877a432ecd27ab2e844bd7ce3ef5073d44b3de58d210",
+      "bytes": 899,
+      "workspace_sha256": "6a6a8116f47c9a89a880877a432ecd27ab2e844bd7ce3ef5073d44b3de58d210",
+      "workspace_bytes": 899
+    },
+    {
       "path": "fw/tests/research_protocol/test_protocol.py",
-      "sha256": "be51850a7e05d91955cc6678ad161218f66f1d4e4e0861d5988df3667d26d97f",
-      "bytes": 3989,
-      "workspace_sha256": "be51850a7e05d91955cc6678ad161218f66f1d4e4e0861d5988df3667d26d97f",
-      "workspace_bytes": 3989
+      "sha256": "387e5efed08abf8daca8e6565945a97c90171aa8a832f48ebd33e46e31f8b51a",
+      "bytes": 4332,
+      "workspace_sha256": "387e5efed08abf8daca8e6565945a97c90171aa8a832f48ebd33e46e31f8b51a",
+      "workspace_bytes": 4332
     },
     {
       "path": "fw/tests/research_protocol/wire_test.c",
@@ -3956,10 +4042,10 @@
     },
     {
       "path": "fw/tools/research_protocol.py",
-      "sha256": "6e7c9cb9a189c1f00baacb21707c5fbc0fdd00e4e805ad0a0fee9eab6f37f1c4",
-      "bytes": 4004,
-      "workspace_sha256": "6e7c9cb9a189c1f00baacb21707c5fbc0fdd00e4e805ad0a0fee9eab6f37f1c4",
-      "workspace_bytes": 4004
+      "sha256": "e003b148401177734c60a6ac6e54f24e9c84b431dcb0e6e33cb504a39b9a7fce",
+      "bytes": 4059,
+      "workspace_sha256": "e003b148401177734c60a6ac6e54f24e9c84b431dcb0e6e33cb504a39b9a7fce",
+      "workspace_bytes": 4059
     },
     {
       "path": "fw/west.yml",
@@ -4088,39 +4174,11 @@
       "workspace_bytes": 6311
     },
     {
-      "path": "docs/BLE_SPEC.md",
-      "sha256": "3b01f0e60cb79ed0adb8a361d6f414c1ed2781e1c1fa3b62d2ea17336525a08a",
-      "bytes": 6865,
-      "workspace_sha256": "3b01f0e60cb79ed0adb8a361d6f414c1ed2781e1c1fa3b62d2ea17336525a08a",
-      "workspace_bytes": 6865
-    },
-    {
-      "path": "docs/S2_S3_S4_IMPLEMENTATION.md",
-      "sha256": "a68310061b956b4e80ab380d8246f551af86ec876b67eedd5731ca46bb99dfde",
-      "bytes": 6782,
-      "workspace_sha256": "a68310061b956b4e80ab380d8246f551af86ec876b67eedd5731ca46bb99dfde",
-      "workspace_bytes": 6782
-    },
-    {
       "path": "setup_nordic.ps1",
       "sha256": "28f329c9ee10b4300fbae04b365e19e6d4e9b504b5e773ba66771dfd71c25bfb",
       "bytes": 2204,
       "workspace_sha256": "28f329c9ee10b4300fbae04b365e19e6d4e9b504b5e773ba66771dfd71c25bfb",
       "workspace_bytes": 2204
-    },
-    {
-      "path": "docs/builds/app_build_report.json",
-      "sha256": "29006e0aad8ae8ef123f88197034450ba88c059fb18859fea02895354472fb0a",
-      "bytes": 1416,
-      "workspace_sha256": "e072c7ed1c7a16cbf296168efa61b8480b5cfa462ed1729975d0e1e9d4723540",
-      "workspace_bytes": 1446
-    },
-    {
-      "path": "docs/builds/firmware_build_report.json",
-      "sha256": "57644971819aa8cc53e66220fb662f7628b5aaca45c24bd4657a3f481125e701",
-      "bytes": 1088,
-      "workspace_sha256": "fa191d3f725cfaf2d0dec6c37d06492d47fa57e1ff59bc913dfd0a5bd670e6e5",
-      "workspace_bytes": 1121
     }
   ],
   "text_normalization": "UTF-8 text CRLF to LF; binary source bytes unchanged"

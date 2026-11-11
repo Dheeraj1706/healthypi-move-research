@@ -30,6 +30,8 @@
 #define HPR_STOPPING 7
 #define HPR_FLAG_TIME_ESTIMATED 1
 #define HPR_FLAG_SIGNED 2
+/* Status flags only: firmware supports opcode 4 and concurrent continuous targets. */
+#define HPR_CAP_CONTINUOUS 2
 
 struct hpr_stamp {
     uint32_t first_index;

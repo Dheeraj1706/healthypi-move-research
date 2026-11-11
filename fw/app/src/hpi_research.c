@@ -10,19 +10,20 @@
 #include <errno.h>
 #include <string.h>
 #include "hpi_research.h"
+#include "hpi_research_policy.h"
 #include "hpi_evt.h"
 #include "hpi_dfu.h"
 
 #define UUID_RESEARCH(n) BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0xa17e0000 + (n), \
     0x4d52, 0x4f56, 0x9100, 0x524553454152))
 
-enum { CMD_START = 1, CMD_STOP = 2, CMD_STATUS = 3 };
+enum { CMD_START = 1, CMD_STOP = 2, CMD_STATUS = 3, CMD_CONTINUOUS = 4 };
 enum { R_ACCEPTED, R_BUSY, R_INVALID, R_NOT_OWNER, R_UNSUPPORTED, R_DFU };
 static atomic_t states[5];
 static atomic_t indices[HPR_LAST_SIGNAL + 1];
-static atomic_t remote_target;
-static atomic_t terminal_target;
-static atomic_t stop_target;
+static atomic_t remote_mask;
+static atomic_t continuous_mask;
+static atomic_t stop_mask;
 static atomic_t finger_busy;
 static atomic_t tx_failures;
 static uint32_t boot_id;
@@ -30,7 +31,7 @@ static struct k_spinlock status_lock;
 static uint8_t status_bytes[HPR_STATUS_SIZE];
 /* Only the control thread dereferences/changes owner. */
 static struct bt_conn *owner;
-static int64_t pending_since;
+static int64_t pending_since[5];
 struct request { struct bt_conn *conn; uint8_t bytes[4]; };
 K_MSGQ_DEFINE(hpr_commands, sizeof(struct request), 4, sizeof(void *));
 struct scalar_packet { struct hpr_stamp stamp; int32_t value; uint8_t signal; };
@@ -42,31 +43,46 @@ static bool active(uint8_t state)
            state == HPR_MEASURING || state == HPR_STOPPING;
 }
 
+bool hpi_research_continuous(uint8_t target)
+{
+    return target >= 1 && target <= 4 &&
+           (atomic_get(&continuous_mask) & BIT(target - 1));
+}
+
+bool hpi_research_stopping(uint8_t target)
+{
+    return target >= 1 && target <= 4 &&
+           (atomic_get(&stop_mask) & BIT(target - 1));
+}
+
 void hpi_research_state(uint8_t target, uint8_t state)
 {
     if (target < 1 || target > 4) { return; }
     uint8_t old = (uint8_t)atomic_get(&states[target]);
     if (state == HPR_IDLE && old >= HPR_COMPLETE && old <= HPR_ERROR) { return; }
     if (state == HPR_IDLE && active(old)) {
-        state = atomic_get(&stop_target) == target ? HPR_CANCELLED : HPR_ERROR;
+        state = hpi_research_stopping(target) ? HPR_CANCELLED : HPR_ERROR;
     }
+    /* A late contact update must not erase a latched Stop. */
+    if (hpi_research_stopping(target) && active(state)) { state = HPR_STOPPING; }
     atomic_set(&states[target], state);
-    if (!active(state) && atomic_cas(&remote_target, target, 0)) {
-        atomic_set(&terminal_target, target);
-        atomic_set(&stop_target, 0);
+    if (!active(state)) {
+        atomic_and(&remote_mask, ~BIT(target - 1));
+        atomic_and(&continuous_mask, ~BIT(target - 1));
+        atomic_and(&stop_mask, ~BIT(target - 1));
     }
 }
 
 bool hpi_research_remote_owned(uint8_t target)
 {
-    return atomic_get(&remote_target) == target && active((uint8_t)atomic_get(&states[target]));
+    return target >= 1 && target <= 4 &&
+           (atomic_get(&remote_mask) & BIT(target - 1));
 }
 
 bool hpi_research_local_allowed(uint8_t target)
 {
     ARG_UNUSED(target);
-    uint8_t owned = (uint8_t)atomic_get(&remote_target);
-    return owned == 0 || !active((uint8_t)atomic_get(&states[owned]));
+    return atomic_get(&remote_mask) == 0;
 }
 
 void hpi_research_finger_busy(bool busy) { atomic_set(&finger_busy, busy); }
@@ -109,7 +125,7 @@ static ssize_t write_control(struct bt_conn *conn, const struct bt_gatt_attr *at
     }
     if (len != 4) { return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN); }
     const uint8_t *b = buf;
-    if (b[0] != HPR_VERSION || b[1] < CMD_START || b[1] > CMD_STATUS ||
+    if (b[0] != HPR_VERSION || b[1] < CMD_START || b[1] > CMD_CONTINUOUS ||
         b[2] > 4 || b[3] == 0 || (b[1] != CMD_STATUS && b[2] == 0)) {
         return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
     }
@@ -142,7 +158,7 @@ static void publish_status(struct bt_conn *conn, uint8_t request_id,
     for (uint8_t i = 1; i <= 4; ++i) {
         if (active((uint8_t)atomic_get(&states[i]))) { b[6] |= BIT(i - 1); }
     }
-    b[7] = HPR_FLAG_TIME_ESTIMATED;
+    b[7] = HPR_FLAG_TIME_ESTIMATED | HPR_CAP_CONTINUOUS;
     hpr_put32(b + 8, boot_id);
     hpr_put32(b + 12, k_uptime_get_32());
     hpr_put32(b + 16, (uint32_t)atomic_get(&tx_failures));
@@ -157,6 +173,8 @@ static void publish_status(struct bt_conn *conn, uint8_t request_id,
 
 static void post_request(uint8_t target, bool start)
 {
+    /* Continuous ECG/BioZ is reconciled by its owning SMF thread. */
+    if (target <= HPR_GSR && hpi_research_continuous(target)) { return; }
     switch (target) {
     case HPR_ECG: k_event_post(&ecg_evt, start ? EVT_ECG_START : EVT_ECG_CANCEL); break;
     case HPR_GSR: k_event_post(&ecg_evt, start ? EVT_GSR_START : EVT_GSR_CANCEL); break;
@@ -171,28 +189,37 @@ static void process(struct request *req)
     struct bt_conn_info info;
     if (bt_conn_get_info(req->conn, &info) || info.state != BT_CONN_STATE_CONNECTED ||
         bt_conn_get_security(req->conn) < BT_SECURITY_L2) { return; }
-    if (hpi_dfu_is_active()) { result = R_DFU; }
-    else if (opcode == CMD_START) {
-        bool busy = atomic_get(&finger_busy) != 0;
-        for (uint8_t i = 1; i <= 4; ++i) { busy |= active((uint8_t)atomic_get(&states[i])); }
+    if (hpi_dfu_is_active() && opcode != CMD_STOP && opcode != CMD_STATUS) { result = R_DFU; }
+    else if (opcode == CMD_START || opcode == CMD_CONTINUOUS) {
+        uint32_t mask = (uint32_t)atomic_get(&remote_mask);
+        uint8_t active_targets = 0;
+        /* Spot checks remain exclusive. Continuous targets can coexist with
+         * other continuous targets on this connection, never local spot/BP. */
+        for (uint8_t i = 1; i <= 4; ++i) {
+            if (active((uint8_t)atomic_get(&states[i]))) { active_targets |= BIT(i - 1); }
+        }
+        bool busy = hpr_start_busy(opcode == CMD_CONTINUOUS,
+            owner && owner != req->conn, mask, atomic_get(&continuous_mask),
+            active_targets, atomic_get(&finger_busy));
         if (owner == req->conn && hpi_research_remote_owned(target)) {
-            /* Idempotent start: do not reset/restart an active measurement. */
+            if (hpi_research_stopping(target) ||
+                hpi_research_continuous(target) != (opcode == CMD_CONTINUOUS)) { result = R_BUSY; }
         } else if (busy) { result = R_BUSY; }
         else {
-            if (owner) { bt_conn_unref(owner); }
-            owner = bt_conn_ref(req->conn);
-            atomic_set(&remote_target, target);
-            atomic_set(&stop_target, 0);
+            if (!owner) { owner = bt_conn_ref(req->conn); }
+            atomic_or(&remote_mask, BIT(target - 1));
+            if (opcode == CMD_CONTINUOUS) { atomic_or(&continuous_mask, BIT(target - 1)); }
+            atomic_and(&stop_mask, ~BIT(target - 1));
             atomic_set(&states[target], HPR_STARTING);
-            pending_since = k_uptime_get();
+            pending_since[target] = k_uptime_get();
             post_request(target, true);
         }
     } else if (opcode == CMD_STOP) {
-        if (owner != req->conn || atomic_get(&remote_target) != target) { result = R_NOT_OWNER; }
-        else if (active((uint8_t)atomic_get(&states[target]))) {
-            atomic_set(&stop_target, target);
+        if (owner != req->conn || !hpi_research_remote_owned(target)) { result = R_NOT_OWNER; }
+        else {
+            atomic_or(&stop_mask, BIT(target - 1));
             atomic_set(&states[target], HPR_STOPPING);
-            pending_since = k_uptime_get();
+            pending_since[target] = k_uptime_get();
             post_request(target, false);
         }
     }
@@ -212,39 +239,34 @@ static void control_thread(void *a, void *b, void *c)
         while (!k_msgq_get(&hpr_scalars, &scalar, K_NO_WAIT)) {
             hpi_research_send(scalar.signal, &scalar.stamp, &scalar.value, 1);
         }
-        uint8_t target = (uint8_t)atomic_get(&remote_target);
-        if (!target) {
-            if (owner) {
-                publish_status(owner, 0, 0, (uint8_t)atomic_get(&terminal_target), R_ACCEPTED);
-                bt_conn_unref(owner); owner = NULL;
-            }
-            continue;
-        }
-        uint8_t state = (uint8_t)atomic_get(&states[target]);
-        /* Keep cancellation latched across the sensor controller's startup
-         * sleeps / stale-event clearing. One early Cancel can otherwise vanish. */
-        if (atomic_get(&stop_target) == target && active(state)) {
-            post_request(target, false);
-        }
-        if ((state == HPR_STARTING || state == HPR_STOPPING) &&
-            k_uptime_get() - pending_since > 5000) {
-            post_request(target, false);
-            hpi_research_state(target, HPR_ERROR);
-        }
+        bool disconnected = false;
         if (owner) {
             struct bt_conn_info info;
-            if (bt_conn_get_info(owner, &info) || info.state != BT_CONN_STATE_CONNECTED) {
-                /* Fail-safe cancellation, not automatic restart after reconnect. */
-                if (active((uint8_t)atomic_get(&states[target]))) {
-                    atomic_set(&stop_target, target);
-                    atomic_set(&states[target], HPR_STOPPING);
-                    pending_since = k_uptime_get();
-                    post_request(target, false);
-                }
-                bt_conn_unref(owner); owner = NULL;
-            } else {
-                publish_status(owner, 0, 0, target, R_ACCEPTED); /* unsolicited status */
+            disconnected = bt_conn_get_info(owner, &info) || info.state != BT_CONN_STATE_CONNECTED;
+        }
+        for (uint8_t target = 1; target <= 4; ++target) {
+            if (!hpi_research_remote_owned(target)) {
+                if (owner && !disconnected) { publish_status(owner, 0, 0, target, R_ACCEPTED); }
+                continue;
             }
+            uint8_t state = (uint8_t)atomic_get(&states[target]);
+            if (disconnected || hpi_dfu_is_active() ||
+                (state == HPR_STARTING && k_uptime_get() - pending_since[target] > 5000)) {
+                atomic_or(&stop_mask, BIT(target - 1));
+                atomic_set(&states[target], HPR_STOPPING);
+            }
+            /* Keep Stop latched through controller startup sleeps/cleared events.
+             * Do not release ownership on a timer: actual teardown acknowledges it. */
+            if (hpi_research_stopping(target)) { post_request(target, false); }
+            if (owner && !disconnected) { publish_status(owner, 0, 0, target, R_ACCEPTED); }
+        }
+        if (owner && atomic_get(&remote_mask) == 0) {
+            if (!disconnected) {
+                for (uint8_t target = 1; target <= 4; ++target) {
+                    publish_status(owner, 0, 0, target, R_ACCEPTED);
+                }
+            }
+            bt_conn_unref(owner); owner = NULL;
         }
     }
 }

@@ -34,6 +34,8 @@ static int max30001_async_sample_fetch(const struct device *dev,
     struct max30001_data *data = dev->data;
     const struct max30001_config *config = dev->config;
 
+    *num_samples_ecg = 0;
+    *num_samples_bioz = 0;
     uint32_t max30001_status, max30001_mngr_int = 0;
     uint32_t e_fifo_num_bytes, b_fifo_num_bytes;
 
@@ -98,27 +100,30 @@ static int max30001_async_sample_fetch(const struct device *dev,
         {
             e_fifo_num_samples = 16;
         }
-        *num_samples_ecg = e_fifo_num_samples;
+        e_fifo_num_bytes = e_fifo_num_samples * 3;
+        *num_samples_ecg = 0;
 
         //_max30001_read_ecg_fifo(dev, e_fifo_num_bytes);
 
         struct spi_buf rx_ecg_buf[2] = {{.buf = NULL, .len = 1}, {.buf = &buf_ecg, .len = (e_fifo_num_bytes)}}; // 24 bit register + 1 dummy byte
         const struct spi_buf_set rx_ecg = {.buffers = rx_ecg_buf, .count = 2};
 
-        spi_transceive_dt(&config->spi, &tx_ecg, &rx_ecg);
+        if (spi_transceive_dt(&config->spi, &tx_ecg, &rx_ecg)) { return -EIO; }
 
         // Also read BioZ FIFO when ECG is active
         if (max30001_mngr_int == 0) {
             max30001_mngr_int = max30001_read_reg(dev, MNGR_INT);
         }
-        b_fifo_num_samples = (((max30001_mngr_int & MAX30001_INT_MASK_BFIT) >> MAX30001_INT_SHIFT_BFIT) + 1);
+        b_fifo_num_samples = data->chip_cfg.reg_cnfg_gen.bit.en_bioz &&
+            (max30001_status & MAX30001_STATUS_MASK_BINT) ?
+            MIN(32U, (((max30001_mngr_int & MAX30001_INT_MASK_BFIT) >> MAX30001_INT_SHIFT_BFIT) + 1)) : 0;
         b_fifo_num_bytes = (b_fifo_num_samples * 3);
-        *num_samples_bioz = b_fifo_num_samples;
+        *num_samples_bioz = 0;
 
         struct spi_buf rx_bioz_buf[2] = {{.buf = NULL, .len = 1}, {.buf = &buf_bioz, .len = b_fifo_num_bytes}}; // 24 bit register
         const struct spi_buf_set rx_bioz = {.buffers = rx_bioz_buf, .count = 2};
 
-        spi_transceive_dt(&config->spi, &tx_bioz, &rx_bioz);
+        if (b_fifo_num_samples && spi_transceive_dt(&config->spi, &tx_bioz, &rx_bioz)) { return -EIO; }
 
         // Read all the samples from the FIFO
         for (int i = 0; i < e_fifo_num_samples; i++)
@@ -135,7 +140,7 @@ static int max30001_async_sample_fetch(const struct device *dev,
                 int32_t secgtemp = (int32_t)uecgtemp;
                 secgtemp = (int32_t)secgtemp >> 6;
 
-                ecg_samples[i] = (int32_t)(secgtemp); //((secgtemp*1000*1000)/2621440);   // Convert to microvolts
+                ecg_samples[(*num_samples_ecg)++] = (int32_t)(secgtemp); //((secgtemp*1000*1000)/2621440);   // Convert to microvolts
                 // printf("%d ", ecg_samples[i]);
             }
             else if (etag == 0x06)
@@ -180,7 +185,7 @@ static int max30001_async_sample_fetch(const struct device *dev,
                 //                                                config->bioz_gain,
                 //                                                config->bioz_cgmag);
                 // bioz_samples[i] = (int32_t)(conductance_uS * 100.0f);
-                bioz_samples[i] = s_bioz_temp; // Store raw ADC value directly, conversion can be done in application layer for flexibility
+                bioz_samples[(*num_samples_bioz)++] = s_bioz_temp; // Store raw ADC value directly, conversion can be done in application layer for flexibility
             }
             else if (btag == 0x06) /* FIFO empty */
             {
@@ -223,19 +228,21 @@ static int max30001_async_sample_fetch(const struct device *dev,
         *num_samples_ecg = 0;
         
         // Read BioZ FIFO
-        b_fifo_num_samples = (((max30001_mngr_int & MAX30001_INT_MASK_BFIT) >> MAX30001_INT_SHIFT_BFIT) + 1);
+        b_fifo_num_samples = data->chip_cfg.reg_cnfg_gen.bit.en_bioz &&
+            (max30001_status & MAX30001_STATUS_MASK_BINT) ?
+            MIN(32U, (((max30001_mngr_int & MAX30001_INT_MASK_BFIT) >> MAX30001_INT_SHIFT_BFIT) + 1)) : 0;
         b_fifo_num_bytes = (b_fifo_num_samples * 3);
-        *num_samples_bioz = b_fifo_num_samples;
+        *num_samples_bioz = 0;
         
         if (b_fifo_num_samples > 32) {
             b_fifo_num_samples = 32;
-            *num_samples_bioz = 32;
+            b_fifo_num_bytes = b_fifo_num_samples * 3;
         }
 
         struct spi_buf rx_bioz_buf[2] = {{.buf = NULL, .len = 1}, {.buf = &buf_bioz, .len = b_fifo_num_bytes}};
         const struct spi_buf_set rx_bioz = {.buffers = rx_bioz_buf, .count = 2};
 
-        spi_transceive_dt(&config->spi, &tx_bioz, &rx_bioz);
+        if (b_fifo_num_samples && spi_transceive_dt(&config->spi, &tx_bioz, &rx_bioz)) { return -EIO; }
 
         /*
          * BioZ FIFO format (24 bits per sample):
@@ -269,7 +276,7 @@ static int max30001_async_sample_fetch(const struct device *dev,
                 //                                             config->bioz_cgmag);       //passing index 1 for the cgmag value of 110nA (low current mode) since that's the mode we're using in the driver                                      
                 // LOG_INF("BioZ sample %d: raw ADC=%d, conductance=%.4f uS", i, s_bioz_temp, (double)conductance_uS);
                 // bioz_samples[i] = (int32_t)(conductance_uS * 100.0f);
-                bioz_samples[i] = s_bioz_temp; // Store raw ADC value directly, conversion can be done in application layer for flexibility
+                bioz_samples[(*num_samples_bioz)++] = s_bioz_temp; // Store raw ADC value directly, conversion can be done in application layer for flexibility
             }
             else if (btag == 0x06) /* FIFO empty */
             {

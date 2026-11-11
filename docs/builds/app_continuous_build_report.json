@@ -1,0 +1,32 @@
+{
+  "apk": "HealthyPi_Move_Continuous_3.0.10.apk",
+  "bytes": 62863855,
+  "sha256": "6e9c0411c4f70f02d38290ceab704c6b9d548f4727da4606a372760b98243c0a",
+  "application_id": "com.protocentral.move.research",
+  "version": "3.0.10+98",
+  "label": "HealthyPi Move PPG",
+  "required_continuous_firmware": "3.1.2-continuous",
+  "release_build": "passed",
+  "targeted_tests_passed": 33,
+  "changed_dart_analysis": "passed",
+  "apk_v2_signature_verification": "passed",
+  "apk_16kb_zip_alignment": "passed",
+  "apk_crc_identity_and_launcher_checks": "passed",
+  "certificate_sha256": "b5a7eaa7cc4288cc0d574c4b9eb1caf00ef2aec7ccd92fc1edd2115b492e0dec",
+  "signing_certificate": "local Android Debug certificate; same as preceding research APK",
+  "min_sdk": 24,
+  "target_sdk": 36,
+  "architectures": [
+    "arm64-v8a",
+    "armeabi-v7a",
+    "x86_64"
+  ],
+  "phone_watch_hardware_tested": false,
+  "long_duration_tested": false,
+  "sources": {
+    "lib/screens/scr_live.dart": "199815308de5ed4ea7054d5b948753a0eba3c0eb508d9a64aec1776380b9da22",
+    "lib/utils/live_stream_controller.dart": "da680527e8b3858b3302e06deaf84bd93058cd33f42c0c2bb4ccc910aedb0683",
+    "lib/utils/research_session_controller.dart": "33b662d1e331b0893400943a73e02db7d8ae368c10825a4f0421d31ae38157c4",
+    "pubspec.yaml": "e3e5a623056156216535efef8591a523e4c8bb2a24a387cc7f42d985b540c359"
+  }
+}

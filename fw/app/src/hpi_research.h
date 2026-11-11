@@ -14,6 +14,8 @@ void hpi_research_send(uint8_t signal, const struct hpr_stamp *stamp,
 void hpi_research_scalar(uint8_t signal, int32_t value);
 /* Hooks report actual state-machine transitions, not merely accepted commands. */
 void hpi_research_state(uint8_t target, uint8_t state);
+bool hpi_research_continuous(uint8_t target);
+bool hpi_research_stopping(uint8_t target);
 bool hpi_research_remote_owned(uint8_t target);
 bool hpi_research_local_allowed(uint8_t target);
 void hpi_research_finger_busy(bool busy);

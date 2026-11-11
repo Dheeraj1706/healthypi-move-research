@@ -7,7 +7,6 @@ import 'package:material_symbols_icons/symbols.dart';
 
 import '../models/device_info.dart';
 import '../models/live_signal.dart';
-import '../ble/research_packet.dart';
 import '../theme/hpi_colors.dart';
 import '../theme/hpi_text.dart';
 import '../ui/charts/hpi_sweep_waveform.dart';
@@ -15,6 +14,7 @@ import '../ui/components/hpi_components.dart';
 import '../utils/connection_manager.dart';
 import '../utils/device_manager.dart';
 import '../utils/live_stream_controller.dart';
+import '../utils/research_session_controller.dart';
 
 class ScrLive extends StatefulWidget {
   const ScrLive({
@@ -34,6 +34,9 @@ class _ScrLiveState extends State<ScrLive> {
   final _cm = ConnectionManager.instance;
   DeviceInfo? _device;
   LiveStreamController? _feed;
+  LiveTransport? _transport;
+  ResearchSessionController? _controls;
+  Future<void> _controlLifecycle = Future.value();
   bool _resolving = true;
   bool _wasConnected = false;
   bool _wasSmpBusy = false;
@@ -77,6 +80,11 @@ class _ScrLiveState extends State<ScrLive> {
     _cm.removeListener(_onLink);
     DeviceManager.pairingRevision.removeListener(_init);
     _ticker?.cancel();
+    final controls = _controls;
+    controls?.removeListener(_onControls);
+    if (controls != null) {
+      unawaited(controls.shutdown().whenComplete(controls.dispose));
+    }
     _feed?.removeListener(_onFeed);
     _feed?.dispose();
     _cm.setStreaming(false);
@@ -119,13 +127,26 @@ class _ScrLiveState extends State<ScrLive> {
         widget.initialDevice ?? await DeviceManager.getPairedDevice();
     if (!mounted) return;
     if (_device?.macAddress != device?.macAddress || _feed == null) {
+      final previous = _controls;
+      previous?.removeListener(_onControls);
+      _controls = null;
+      if (previous != null) {
+        _controlLifecycle = _controlLifecycle.then((_) async {
+          await previous.shutdown();
+          previous.dispose();
+        });
+      }
       _feed?.removeListener(_onFeed);
       _feed?.dispose();
+      _transport =
+          device == null
+              ? null
+              : widget.transport ?? ConnectedLiveTransport(device.macAddress);
       _feed =
           device == null
               ? null
               : LiveStreamController(
-                widget.transport ?? ConnectedLiveTransport(device.macAddress),
+                _transport!,
                 onSamples: (signal, values, breakBefore) {
                   if (!mounted || values.isEmpty) return;
                   final buffer = _buffer(signal);
@@ -151,13 +172,177 @@ class _ScrLiveState extends State<ScrLive> {
     _restart();
   }
 
-  void _restart() {
+  void _restart({bool force = false}) {
     _lastSample.clear();
     _latest.clear();
     for (final buffer in _buffers.values) {
       buffer.clear();
     }
-    unawaited(_feed?.select(!widget.active || _cm.isSmpBusy ? {} : _selected));
+    unawaited(
+      _feed?.select(
+        !widget.active || _cm.isSmpBusy
+            ? {}
+            : _transport?.hasResearch == true
+            ? LiveSignal.values.toSet()
+            : _selected,
+        force: force,
+      ),
+    );
+    _controlLifecycle = _controlLifecycle.then((_) async {
+      if (!mounted) return;
+      final enabled = widget.active && !_cm.isSmpBusy && _connected;
+      if (enabled && force && _controls != null && !_controls!.ready) {
+        final old = _controls!;
+        _controls = null;
+        old.removeListener(_onControls);
+        await old.shutdown();
+        old.dispose();
+      }
+      if (!enabled && _controls != null) {
+        final old = _controls!;
+        _controls = null;
+        old.removeListener(_onControls);
+        await old.shutdown();
+        old.dispose();
+        if (mounted) setState(() {});
+      } else if (enabled &&
+          _controls == null &&
+          _transport is ResearchControlTransport &&
+          _transport!.hasResearch) {
+        final controls = ResearchSessionController(_transport!);
+        _controls = controls;
+        controls.addListener(_onControls);
+        await controls.open();
+        if (mounted) setState(() {});
+      }
+    });
+  }
+
+  void _onControls() {
+    if (mounted) setState(() {});
+  }
+
+  Widget _sensorControls() {
+    final controls = _controls!;
+    final enabled = controls.ready && controls.supported && !controls.busy;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: TextButton.icon(
+                onPressed: () => _openSensorPanel(controls),
+                icon: const Icon(Icons.tune),
+                label: Text('Sensors ${controls.activeMask == 0 ? '' : 'ON'}'),
+              ),
+            ),
+            TextButton(
+              onPressed:
+                  enabled
+                      ? () => controls.setTargets(
+                        ResearchTarget.values,
+                        start: true,
+                      )
+                      : null,
+              child: const Text('Start all'),
+            ),
+            TextButton(
+              onPressed:
+                  enabled
+                      ? () => controls.setTargets(
+                        ResearchTarget.values,
+                        start: false,
+                      )
+                      : null,
+              child: const Text('Stop all'),
+            ),
+          ],
+        ),
+        if (controls.error != null)
+          SizedBox(
+            height: 44,
+            child: SingleChildScrollView(
+              child: Text(
+                controls.error!,
+                style: HpiText.supporting.copyWith(color: HpiColors.error),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  void _openSensorPanel(ResearchSessionController controls) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder:
+          (context) => AnimatedBuilder(
+            animation: controls,
+            builder: (context, _) {
+              final enabled =
+                  controls.ready && controls.supported && !controls.busy;
+              return SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text('Continuous sensors', style: HpiText.sectionLabel),
+                        const SizedBox(height: 12),
+                        for (final target in ResearchTarget.values)
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '${target.label}\n${controls.stateLabel(target)}',
+                                  style: HpiText.supporting,
+                                ),
+                              ),
+                              TextButton(
+                                onPressed:
+                                    enabled && !controls.active(target)
+                                        ? () => controls.setTargets([
+                                          target,
+                                        ], start: true)
+                                        : null,
+                                child: const Text('Start'),
+                              ),
+                              TextButton(
+                                onPressed:
+                                    enabled && controls.canStop(target)
+                                        ? () => controls.setTargets([
+                                          target,
+                                        ], start: false)
+                                        : null,
+                                child: const Text('Stop'),
+                              ),
+                            ],
+                          ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Wrist PPGs: green, red and IR. Finger PPGs: red and IR. '
+                          'Sensors can run together. Contact is required for usable signals.',
+                          style: HpiText.supporting,
+                        ),
+                        if (controls.error != null)
+                          Text(
+                            controls.error!,
+                            style: HpiText.supporting.copyWith(
+                              color: HpiColors.error,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+    );
   }
 
   Future<void> _connect() async {
@@ -292,7 +477,7 @@ class _ScrLiveState extends State<ScrLive> {
                 if (_connected)
                   IconButton(
                     tooltip: 'Retry live streams',
-                    onPressed: _restart,
+                    onPressed: () => _restart(force: true),
                     icon: const Icon(Symbols.refresh),
                   ),
               ],
@@ -300,6 +485,7 @@ class _ScrLiveState extends State<ScrLive> {
             if (!_connected)
               Expanded(child: _disconnected())
             else ...[
+              if (_controls != null) _sensorControls(),
               Expanded(child: _waveformCard(_primary)),
               if (_compare) ...[
                 const SizedBox(height: 10),
@@ -308,7 +494,8 @@ class _ScrLiveState extends State<ScrLive> {
               const SizedBox(height: 10),
               Text(
                 'PPG is shown in raw counts with an adaptive scale. '
-                'Use watch controls to start measurements.',
+                'Continuous mode runs until Stop. Keep this app foreground on Live; '
+                'leaving Live or disconnecting requests Stop. Live view does not save recordings.',
                 style: HpiText.supporting,
               ),
             ],
@@ -330,9 +517,20 @@ class _ScrLiveState extends State<ScrLive> {
             : _feed?.errors[signal];
     final count = _feed?.sampleCounts[signal] ?? 0;
     final missing = _feed?.missingCounts[signal] ?? 0;
-    final useResearch =
-        signal.isPpg &&
-        (widget.transport?.hasResearch ?? _cm.hasService(researchService));
+    final useResearch = _transport?.hasResearch == true;
+    final target =
+        signal == LiveSignal.ecg
+            ? ResearchTarget.ecg
+            : signal == LiveSignal.gsr
+            ? ResearchTarget.gsr
+            : signal.isFinger
+            ? ResearchTarget.finger
+            : ResearchTarget.wrist;
+    final waitingHint =
+        _controls == null
+            ? signal.waitingHint
+            : '${_controls!.stateLabel(target)}. Use Sensors to Start/Stop, '
+                'and maintain contact. Waiting for recent samples.';
     return HpiCard(
       waveform: true,
       padding: const EdgeInsets.all(12),
@@ -374,7 +572,7 @@ class _ScrLiveState extends State<ScrLive> {
                       padding: const EdgeInsets.all(12),
                       child: SingleChildScrollView(
                         child: Text(
-                          error ?? signal.waitingHint,
+                          error ?? waitingHint,
                           textAlign: TextAlign.center,
                           style: HpiText.body.copyWith(
                             fontSize: 12,

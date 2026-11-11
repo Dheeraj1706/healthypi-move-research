@@ -149,6 +149,8 @@ static atomic_t m_curr_state = ATOMIC_INIT(0);
  * (on completion/timeout), read by both of those plus the SMF state-entry fns.
  * atomic for cross-thread visibility, same as m_curr_state. */
 static atomic_t spo2_measurement_in_progress = ATOMIC_INIT(0);
+static atomic_t research_restore_requested;
+K_MUTEX_DEFINE(wr_research_mutex);
 static enum max32664c_scd_states m_curr_scd_state;
 
 // Externs
@@ -236,17 +238,25 @@ K_WORK_DELAYABLE_DEFINE(work_off_skin_threshold, work_off_skin_threshold_handler
 
 void work_probe_enable_handler(struct k_work *work)
 {
+    k_mutex_lock(&wr_research_mutex, K_FOREVER);
+    if (!hpi_research_continuous(HPR_WRIST)) {
     probing_algorithm_enabled = false;
     wr_stop_algo();
     k_event_post(&ppg_wr_events, EVT_PROBE_TIMEOUT);
+    }
+    k_mutex_unlock(&wr_research_mutex);
 }
 K_WORK_DELAYABLE_DEFINE(work_probe_enable, work_probe_enable_handler);
 
 void work_probe_sleep_handler(struct k_work *work)
 {
+    k_mutex_lock(&wr_research_mutex, K_FOREVER);
+    if (!hpi_research_continuous(HPR_WRIST)) {
     probing_algorithm_enabled = true;
     wr_set_op_mode(MAX32664C_OP_MODE_SCD, MAX32664C_ALGO_MODE_CONT_HRM);
     k_work_schedule(&work_probe_enable, K_SECONDS(PROBE_ENABLE_WAIT_S));
+    }
+    k_mutex_unlock(&wr_research_mutex);
 }
 K_WORK_DELAYABLE_DEFINE(work_probe_sleep, work_probe_sleep_handler);
 
@@ -409,7 +419,7 @@ static void sensor_ppg_wrist_decode(uint8_t *buf, uint32_t buf_len)
                 }
             }
 
-            if ((ppg_sensor_sample.spo2_valid_percent_complete == 100) && atomic_get(&spo2_measurement_in_progress))
+            if ((ppg_sensor_sample.spo2_valid_percent_complete == 100) && atomic_get(&spo2_measurement_in_progress) && !hpi_research_continuous(HPR_WRIST))
             {
                 k_event_post(&spo2_evt, EVT_SPO2_STOP);
                 if (ppg_sensor_sample.spo2_confidence > 50)
@@ -435,7 +445,7 @@ static void sensor_ppg_wrist_decode(uint8_t *buf, uint32_t buf_len)
                 }
                 atomic_set(&spo2_measurement_in_progress, 0);
             }
-            else if (atomic_get(&spo2_measurement_in_progress))
+            else if (atomic_get(&spo2_measurement_in_progress) && !hpi_research_continuous(HPR_WRIST))
             {
                 LOG_INF("Spo2 : %d | Confidence : %d | Progress : %d | SCD : %d | Low PI : %d",
                    ppg_sensor_sample.spo2,
@@ -445,7 +455,7 @@ static void sensor_ppg_wrist_decode(uint8_t *buf, uint32_t buf_len)
                    ppg_sensor_sample.spo2_low_pi);
             }
 
-            if (ppg_sensor_sample.spo2_state == SPO2_MEAS_TIMEOUT)
+            if (ppg_sensor_sample.spo2_state == SPO2_MEAS_TIMEOUT && !hpi_research_continuous(HPR_WRIST))
             {
                 k_event_post(&spo2_evt, EVT_SPO2_STOP);
                 set_measured_spo2(0, SPO2_MEAS_TIMEOUT);
@@ -453,6 +463,9 @@ static void sensor_ppg_wrist_decode(uint8_t *buf, uint32_t buf_len)
             }
 
             m_curr_scd_state = ppg_sensor_sample.scd_state;
+            if (hpi_research_continuous(HPR_WRIST)) {
+                hpi_research_state(HPR_WRIST, ppg_sensor_sample.scd_state == MAX32664C_SCD_STATE_OFF_SKIN ? HPR_WAITING : HPR_MEASURING);
+            }
             /* Forward raw PPG samples whenever the hub is not *positively* off-skin.
              *
              * Previously this gated on SCD == ON_SKIN (the fully-locked state). On a
@@ -573,7 +586,7 @@ static void ppg_samp_state_active_entry(void *obj)
     if (atomic_get(&spo2_measurement_in_progress))
     {
         LOG_INF("Spo2 ACTIVE -> staying in Spo2 algo");
-        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2);
+        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, (hpi_research_continuous(HPR_WRIST) ? MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2 : MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2));
         return;
     }
     atomic_set(&m_curr_state, PPG_SAMP_STATE_ACTIVE);
@@ -624,7 +637,7 @@ static void st_ppg_samp_probing_entry(void *o)
     if (atomic_get(&spo2_measurement_in_progress))
     {
         LOG_INF("Spo2 ACTIVE -> staying in Spo2 algo");
-        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2);
+        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, (hpi_research_continuous(HPR_WRIST) ? MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2 : MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2));
         return;
     }
     atomic_set(&m_curr_state, PPG_SAMP_STATE_PROBING);
@@ -706,7 +719,7 @@ static void st_ppg_samp_off_skin_entry(void *o)
     if (atomic_get(&spo2_measurement_in_progress))
     {
         LOG_INF("Spo2 ACTIVE -> staying in Spo2 algo");
-        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2);
+        wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, (hpi_research_continuous(HPR_WRIST) ? MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2 : MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2));
         return;
     }
     atomic_set(&m_curr_state, PPG_SAMP_STATE_OFF_SKIN);
@@ -842,7 +855,21 @@ static void smf_ppg_wrist_thread(void)
             wdt_ch_ppg_wr = hpi_watchdog_register("smf_ppg_wrist", 10000);
         }
 
+        k_mutex_lock(&wr_research_mutex, K_FOREVER);
+        if (atomic_get(&research_restore_requested)) {
+            /* Only this SMF thread may mutate its own state context. */
+            smf_set_state(SMF_CTX(&sm_ctx_ppg_wr), &ppg_samp_states[PPG_SAMP_STATE_ACTIVE]);
+            atomic_set(&research_restore_requested, 0);
+            hpi_research_state(HPR_WRIST, HPR_CANCELLED);
+        }
+        if (hpi_research_continuous(HPR_WRIST)) {
+            k_mutex_unlock(&wr_research_mutex);
+            hpi_watchdog_feed(wdt_ch_ppg_wr);
+            k_msleep(PPG_WR_HOUSEKEEP_MS);
+            continue;
+        }
         ret = smf_run_state(SMF_CTX(&sm_ctx_ppg_wr));
+        k_mutex_unlock(&wr_research_mutex);
 
         if (ret)
         {
@@ -853,6 +880,44 @@ static void smf_ppg_wrist_thread(void)
          * inbox (k_event_wait with PPG_WR_HOUSEKEEP_MS timeout), which paces
          * the loop and feeds the watchdog. */
     }
+}
+
+/* Continuous research mode uses the hub's continuous HR + SpO2 mode.
+ * It neither restarts spot checks nor stops on a completed SpO2 estimate. */
+static bool research_wrist_tick(void)
+{
+    static bool running;
+    if (!hpi_research_continuous(HPR_WRIST)) { return false; }
+    k_event_clear(&spo2_evt, EVT_SPO2_START | EVT_SPO2_STOP | EVT_SPO2_CANCEL);
+    if (hpi_research_stopping(HPR_WRIST)) {
+        if (atomic_get(&research_restore_requested)) { return true; }
+        k_timer_stop(&tmr_ppg_wrist_sampling);
+        if (wr_set_op_mode(MAX32664C_OP_MODE_STOP_ALGO, MAX32664C_ALGO_MODE_NONE)) { return true; }
+        atomic_set(&spo2_measurement_in_progress, 0);
+        running = false;
+        /* Let the SMF thread restore normal operation and acknowledge. */
+        atomic_set(&research_restore_requested, 1);
+    } else if (!running) {
+        k_work_cancel_delayable(&work_off_skin_threshold);
+        k_work_cancel_delayable(&work_probe_enable);
+        k_work_cancel_delayable(&work_probe_sleep);
+        k_work_cancel_delayable(&work_offskin_timeout);
+        k_timer_stop(&tmr_ppg_wrist_sampling);
+        int ret = wr_set_op_mode(MAX32664C_OP_MODE_STOP_ALGO, MAX32664C_ALGO_MODE_NONE);
+        if (!ret) { ret = wr_set_op_mode(MAX32664C_OP_MODE_EXIT_WAKE_ON_MOTION, MAX32664C_ALGO_MODE_NONE); }
+        if (!ret) { ret = wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2); }
+        if (ret) {
+            if (!wr_set_op_mode(MAX32664C_OP_MODE_STOP_ALGO, MAX32664C_ALGO_MODE_NONE)) {
+                hpi_research_state(HPR_WRIST, HPR_ERROR);
+            }
+        } else {
+            running = true;
+            atomic_set(&spo2_measurement_in_progress, 1);
+            hpi_research_state(HPR_WRIST, HPR_WAITING);
+            k_timer_start(&tmr_ppg_wrist_sampling, K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS), K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS));
+        }
+    }
+    return true;
 }
 
 static void ppg_wrist_ctrl_thread(void)
@@ -875,6 +940,10 @@ static void ppg_wrist_ctrl_thread(void)
         }
         hpi_watchdog_feed(wdt_ch_ppg_ctrl);
 
+        k_mutex_lock(&wr_research_mutex, K_FOREVER);
+        bool research = research_wrist_tick();
+        k_mutex_unlock(&wr_research_mutex);
+        if (research) { continue; }
         bool start_req = hpi_evt_consume(&spo2_evt, EVT_SPO2_START);
         if (start_req)
         {
@@ -901,7 +970,7 @@ static void ppg_wrist_ctrl_thread(void)
 
             wr_set_op_mode(MAX32664C_OP_MODE_STOP_ALGO, MAX32664C_ALGO_MODE_NONE);
             k_msleep(600);
-            wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2);
+            wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, (hpi_research_continuous(HPR_WRIST) ? MAX32664C_ALGO_MODE_CONT_HR_CONT_SPO2 : MAX32664C_ALGO_MODE_CONT_HR_SHOT_SPO2));
             k_msleep(600);
             k_timer_start(&tmr_ppg_wrist_sampling, K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS), K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS));
 
@@ -910,10 +979,10 @@ static void ppg_wrist_ctrl_thread(void)
             /* H-REC: bracket the wrist SpO2 spot-check. Completion/timeout post
              * EVT_SPO2_STOP (handled below) and user cancel posts EVT_SPO2_CANCEL,
              * so every teardown path funnels through the two handlers below. */
-            hpi_data_set_ppg_wrist_record_active(true);
+            hpi_data_set_ppg_wrist_record_active(!hpi_research_continuous(HPR_WRIST));
         }
 
-        if (!start_req && hpi_evt_consume(&spo2_evt, EVT_SPO2_STOP))
+        if (!start_req && hpi_evt_consume(&spo2_evt, EVT_SPO2_STOP) && !hpi_research_continuous(HPR_WRIST))
         {
             LOG_DBG("Stopping One Shot SpO2");
             k_timer_stop(&tmr_ppg_wrist_sampling);
@@ -954,7 +1023,6 @@ static void ppg_wrist_ctrl_thread(void)
             if (atomic_get(&spo2_measurement_in_progress))
             {
                 LOG_DBG("Cancelling One Shot SpO2 (user initiated)");
-                hpi_research_state(HPR_WRIST, HPR_CANCELLED);
                 k_timer_stop(&tmr_ppg_wrist_sampling);
                 atomic_set(&spo2_measurement_in_progress, 0);
                 hpi_data_set_ppg_wrist_record_active(false);   // H-REC: finalize capture
@@ -967,6 +1035,7 @@ static void ppg_wrist_ctrl_thread(void)
                 wr_set_op_mode(MAX32664C_OP_MODE_ALGO_AEC, MAX32664C_ALGO_MODE_CONT_HRM);
                 k_msleep(600);
                 k_timer_start(&tmr_ppg_wrist_sampling, K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS), K_MSEC(PPG_WRIST_SAMPLING_INTERVAL_MS));
+                hpi_research_state(HPR_WRIST, HPR_CANCELLED);
             }
         }
         /* No trailing k_msleep: the k_event_wait at the top of the loop blocks

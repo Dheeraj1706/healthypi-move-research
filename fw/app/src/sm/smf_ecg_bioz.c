@@ -464,6 +464,8 @@ static void work_ecg_loff_handler(struct k_work *work)
 }
 K_WORK_DEFINE(work_ecg_loff, work_ecg_loff_handler);
 
+static void sensor_bioz_only_process_decode(uint8_t *buf, uint32_t buf_len);
+
 static void sensor_ecg_process_decode(uint8_t *buf, uint32_t buf_len)
 {
     // Input validation
@@ -474,6 +476,8 @@ static void sensor_ecg_process_decode(uint8_t *buf, uint32_t buf_len)
     }
 
     const struct max30001_encoded_data *edata = (const struct max30001_encoded_data *)buf;
+    /* A single FIFO read drains both channels: forward BioZ exactly once. */
+    if (get_gsr_active()) { sensor_bioz_only_process_decode(buf, buf_len); }
     struct hpi_ecg_bioz_sensor_data_t ecg_sensor_sample;
 
     uint8_t ecg_num_samples = edata->num_samples_ecg;
@@ -567,7 +571,7 @@ static void sensor_ecg_process_decode(uint8_t *buf, uint32_t buf_len)
             // else: already in lead-on state, nothing to do
         }
 
-        if (get_ecg_active() || get_gsr_active())
+        if (get_ecg_active() && ecg_sensor_sample.ecg_num_samples)
         {
     hpi_research_stamp(HPR_ECG, &ecg_sensor_sample.research_stamp, ecg_sensor_sample.ecg_num_samples);
     int ret = k_msgq_put(&q_ecg_sample, &ecg_sensor_sample, K_NO_WAIT);
@@ -640,6 +644,7 @@ static void sensor_bioz_only_process_decode(uint8_t *buf, uint32_t buf_len)
     sample.hr = edata->hr;
     sample.rtor = edata->rri;
     sample.ecg_lead_off = edata->ecg_lead_off;
+    sample.bioz_lead_off = edata->bioz_lead_off;
 
 
   //  LOG_DBG("GSR sensor data: bioz_lead_off=%d", edata->bioz_lead_off);
@@ -677,6 +682,7 @@ static void sensor_bioz_only_process_decode(uint8_t *buf, uint32_t buf_len)
 
 static void work_bioz_sample_handler(struct k_work *work)
 {
+    if (get_ecg_active()) { return; }
     uint8_t ecg_bioz_buf[512];
     int ret;
 
@@ -707,7 +713,7 @@ static void ecg_sampling_handler(struct k_timer *dummy)
 
 static void bioz_sampling_handler(struct k_timer *dummy)
 {
-    if (get_gsr_active()) {
+    if (get_gsr_active() && !get_ecg_active()) {
         k_work_submit(&work_bioz_sample);
     }
 }
@@ -868,6 +874,7 @@ static int hw_max30001_gsr_disable(void)
 
 void gsr_background_start(void)
 {
+    if (hpi_research_remote_owned(HPR_ECG) || hpi_research_remote_owned(HPR_GSR)) { return; }
     /* Already running? do nothing */
     if (atomic_get(&g_gsr_bg_active)) {
         return;
@@ -887,6 +894,7 @@ void gsr_background_start(void)
 
 void gsr_background_stop(void)
 {
+    if (hpi_research_remote_owned(HPR_ECG) || hpi_research_remote_owned(HPR_GSR)) { return; }
     /* Not running? do nothing */
     if (!atomic_get(&g_gsr_bg_active)) {
         return;
@@ -1621,6 +1629,46 @@ static const struct smf_state ecg_states[] = {
     [HPI_ECG_STATE_GSR_COMPLETE]       = SMF_CREATE_STATE(NULL, st_gsr_complete_run, NULL, NULL, NULL),
 };
 
+/* Research mode owns this thread while ECG and/or BioZ are continuous.
+ * It deliberately bypasses spot-check countdowns, record-size limits and lead
+ * placement timeouts. Contact is status, not an automatic end of acquisition.
+ * Never opens an unbounded watch flash record; these are live BLE streams. */
+static bool research_ecg_bioz_tick(void)
+{
+    bool ecg = hpi_research_continuous(HPR_ECG);
+    bool gsr = hpi_research_continuous(HPR_GSR);
+    if (!ecg && !gsr) { return false; }
+    k_event_clear(&ecg_evt, EVT_ECG_START | EVT_GSR_START | EVT_ECG_CANCEL |
+                  EVT_GSR_CANCEL | EVT_ECG_COMPLETE | EVT_GSR_COMPLETE);
+    for (uint8_t target = HPR_ECG; target <= HPR_GSR; ++target) {
+        if (!hpi_research_continuous(target)) { continue; }
+        bool enabled = target == HPR_ECG ? get_ecg_active() : get_gsr_active();
+        if (hpi_research_stopping(target)) {
+            int ret = target == HPR_ECG ? hw_max30001_ecg_disable() : hw_max30001_gsr_disable();
+            if (ret == 0) {
+                if (target == HPR_ECG) { k_timer_stop(&tmr_ecg_sampling); }
+                else { k_timer_stop(&tmr_bioz_sampling); }
+                hpi_research_state(target, HPR_CANCELLED);
+            }
+        } else {
+            int ret = enabled ? 0 : (target == HPR_ECG ? hw_max30001_ecg_enable() : hw_max30001_gsr_enable());
+            if (ret != 0) {
+                /* Attempt teardown; leave ownership latched if it fails. */
+                int off = target == HPR_ECG ? hw_max30001_ecg_disable() : hw_max30001_gsr_disable();
+                if (off == 0) { hpi_research_state(target, HPR_ERROR); }
+                continue;
+            }
+            if (!enabled) {
+                if (target == HPR_ECG) { ecg_start_sampling(); }
+                else { bioz_start_sampling(); }
+            }
+            bool contact = target == HPR_ECG ? !get_ecg_lead_on_off() : !get_gsr_lead_on_off();
+            hpi_research_state(target, contact ? HPR_MEASURING : HPR_WAITING);
+        }
+    }
+    return true;
+}
+
 void smf_ecg_thread(void)
 {
     int ret;
@@ -1668,7 +1716,7 @@ void smf_ecg_thread(void)
             wdt_ch = hpi_watchdog_register("smf_ecg", 10000);
         }
 
-        ret = smf_run_state(SMF_CTX(&s_ecg_obj));
+        ret = research_ecg_bioz_tick() ? 0 : smf_run_state(SMF_CTX(&s_ecg_obj));
         if (ret != 0)
         {
             LOG_ERR("SMF Run error: %d", ret);

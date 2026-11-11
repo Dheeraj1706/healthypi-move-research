@@ -10,6 +10,28 @@ commits, licenses and the exact changed files are recorded below and in
 features have been built and checked with automated tests; they have not yet
 been validated as a complete system on a physical watch and phone.
 
+## Continuous acquisition update
+
+The matching research versions are **app 3.0.10+98** and **firmware
+3.1.2-continuous**. Live now offers Start all / Stop all and individual ECG,
+GSR, wrist PPG and finger PPG controls. Continuous research mode bypasses the
+30-second spot-check cutoff; chart changes do not restart acquisition. The app
+checks firmware capability and shows command rejection, contact and stopping
+states. All seven waveforms share one encrypted research data subscription.
+
+**Validation:** 33 targeted Flutter tests and changed-file analysis passed;
+10 Python protocol tests and host C wire/control-policy checks passed; Android
+release and Nordic target builds passed. APK signature/alignment and OTA image
+signature/manifest checks passed. Physical simultaneous acquisition and 3–5 hour
+reliability remain unverified. Static app RAM is 99.08% used. Live view does not
+add mobile storage/export or a background acquisition service.
+
+See [installation and limitations](docs/CONTINUOUS_INSTALL.md),
+[app controls](app/docs/CONTINUOUS_LIVE.md),
+[firmware protocol and acquisition](fw/docs/CONTINUOUS_RESEARCH.md), and
+[build reports](docs/builds/). Older versioned build reports are retained for
+the preceding PPG-only release.
+
 ## Repository contents
 
 | Directory | Contents |
@@ -23,22 +45,26 @@ been validated as a complete system on a physical watch and phone.
 
 ## Implemented work
 
-**Firmware, custom version `3.1.1-ppg`:**
+**Firmware, custom version `3.1.2-continuous`:**
 
 - An encrypted research BLE service with measurement control, state updates,
   boot ID, estimated device uptime and sample indices.
 - Three additional optical channels: wrist red, wrist infrared and finger red.
   The existing wrist green and finger infrared streams are retained.
 - Channels from each optical sensor batch share its producer index/timestamp.
-- Existing measurement state machines, contact checks and legacy BLE layouts
-  are retained. Continuous acquisition of every sensor is not implemented.
+- Independent continuous Start/Stop for ECG, GSR/BioZ, wrist PPGs and finger
+  PPGs; continuous targets can coexist on one owning BLE connection. The ECG
+  acquisition path forwards BioZ from the shared FIFO read. Wrist selects the
+  hub's continuous HR+SpO2 mode. These changes still need hardware validation.
 
-**Flutter Android app, version `3.0.9+97`:**
+**Flutter Android app, version `3.0.10+98`:**
 
 - Live selection of ECG, GSR, wrist green/red/IR and finger IR/red PPG.
 - Two-graph Compare mode on phones and tablets, adaptive PPG scaling, sample
   totals, latest values, inferred gaps, subscription errors and retry.
-- One shared encrypted PPG subscription with per-channel decoding/continuity.
+- One shared encrypted waveform subscription with per-channel decoding/continuity.
+- Continuous Start all/Stop all and independent sensor group controls, with
+  matching firmware capability checks and acknowledged sensor state.
 - Live subscriptions stop when leaving the Live tab and pause during SMP work.
 - Legacy endpoint fallback for the original PPG channels when the custom service
   is absent. Extra channels display a firmware requirement message.
@@ -59,10 +85,10 @@ been integrated with the new research protocol or the extra PPG channels.
 
 | Area | Recorded status |
 |---|---|
-| Firmware reference protocol | 9 Python tests and the host C encoder test passed |
+| Firmware reference protocol | 10 Python tests and host C encoder/control-policy checks passed |
 | Nordic target build | NCS 3.4.0 build completed; both MCUboot image signatures checked |
-| Firmware memory | Signed app 784,924 bytes; static RAM 446,368 / 450,560 bytes (99.07%) |
-| Flutter | Changed files passed analysis; 26 targeted tests passed |
+| Firmware memory | Signed app 786,447 bytes; static RAM 446,416 / 450,560 bytes (99.08%) |
+| Flutter | Changed files passed analysis; 33 targeted tests passed |
 | Android APK | Release build, signature, package identity, CRC and alignment checks passed |
 | Physical phone/watch integration | Pending |
 | Finger PPG recording validation | Pending |
@@ -72,7 +98,7 @@ been integrated with the new research protocol or the extra PPG channels.
 
 Build evidence is in [`docs/builds/`](docs/builds/). Automated tests and a
 successful build are not evidence of uninterrupted device recording. The custom
-firmware retains finite measurement modes, and red/IR availability depends on
+firmware retains finite spot modes alongside continuous research mode; red/IR availability depends on
 sensor mode/contact. Device uptime is estimated; indices do not prove exact
 cross-sensor synchronization or lossless capture.
 

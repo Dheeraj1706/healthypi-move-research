@@ -39,6 +39,39 @@
          android:icon="@mipmap/launcher_icon"
          android:requestLegacyExternalStorage="true">
 --- /dev/null
++++ b/docs/CONTINUOUS_LIVE.md
+@@ -0,0 +1,30 @@
++# Continuous Live controls — app 3.0.10+98
++
++Use with firmware **3.1.2-continuous**. The app ID remains
++`com.protocentral.move.research` and the launcher remains HealthyPi Move PPG.
++
++1. Install the APK, update the watch using the supplied OTA ZIP, then reconnect.
++2. Open Live and accept Bluetooth pairing if asked.
++3. Tap **Start all** to request ECG, GSR, wrist PPGs and finger PPGs together.
++   The phone checks firmware capability; old firmware cannot silently fall back
++   to a 30-second spot check.
++4. Tap **Sensors** for independent Start/Stop and actual per-target status.
++   Waiting for contact is different from streaming; command acceptance is not
++   proof that usable samples are arriving.
++5. Select any of seven waveforms and optionally Compare two. All seven are
++   subscribed through one encrypted data characteristic while Live is active.
++   Changing charts does not restart sensor acquisition.
++6. Tap Stop all or stop an individual group. Wrist PPGs share one optical mode;
++   finger PPGs share another. You cannot independently stop red while keeping
++   IR on the same sensor. Stopping the wrist research group restores normal
++   wrist HR/green PPG operation.
++
++Keep the app foreground on Live. Leaving Live requests cancellation, and link
++loss also requests cancellation in firmware. Reconnection needs an explicit
++Start. This version has no background acquisition service or new persistent
++mobile recording/export; Live plots and sample counts are not stored sessions.
++
++The watch still needs proper electrode/optical contact. Continuous operation
++and simultaneous signal quality have not been tested on physical hardware here.
++See `fw/docs/CONTINUOUS_RESEARCH.md` in the project for implementation and test
++limits. The research APK is a release-mode build with a local debug certificate.
+--- /dev/null
 +++ b/docs/RESEARCH_PPG_LIVE.md
 @@ -0,0 +1,59 @@
 +# HealthyPi Move PPG research app
@@ -271,7 +304,7 @@
 +}
 --- a/lib/screens/scr_live.dart
 +++ b/lib/screens/scr_live.dart
-@@ -2,345 +2,315 @@
+@@ -2,345 +2,502 @@
  // SPDX-License-Identifier: MIT
  
  import 'dart:async';
@@ -283,7 +316,6 @@
 -import '../globals.dart';
  import '../models/device_info.dart';
 +import '../models/live_signal.dart';
-+import '../ble/research_packet.dart';
  import '../theme/hpi_colors.dart';
  import '../theme/hpi_text.dart';
 -import '../ui/adaptive/breakpoints.dart';
@@ -301,6 +333,7 @@
 -/// timebase (4b). Stat values that need derivation the app doesn't do yet
 -/// (RR interval, leads-on) are shown as "—" rather than invented.
 +import '../utils/live_stream_controller.dart';
++import '../utils/research_session_controller.dart';
 +
  class ScrLive extends StatefulWidget {
 -  const ScrLive({super.key});
@@ -386,6 +419,9 @@
 -
    DeviceInfo? _device;
 +  LiveStreamController? _feed;
++  LiveTransport? _transport;
++  ResearchSessionController? _controls;
++  Future<void> _controlLifecycle = Future.value();
    bool _resolving = true;
 -  String? _error;
 -
@@ -460,6 +496,11 @@
 -    // (sync, DFU) may still need it.
 -    unawaited(_unsubscribeAll());
 +    _ticker?.cancel();
++    final controls = _controls;
++    controls?.removeListener(_onControls);
++    if (controls != null) {
++      unawaited(controls.shutdown().whenComplete(controls.dispose));
++    }
 +    _feed?.removeListener(_onFeed);
 +    _feed?.dispose();
 +    _cm.setStreaming(false);
@@ -509,26 +550,42 @@
 -    } else {
 -      for (final s in _subs.values) {
 -        s.cancel();
--      }
++  }
++
++  Future<void> _init() async {
++    final device =
++        widget.initialDevice ?? await DeviceManager.getPairedDevice();
++    if (!mounted) return;
++    if (_device?.macAddress != device?.macAddress || _feed == null) {
++      final previous = _controls;
++      previous?.removeListener(_onControls);
++      _controls = null;
++      if (previous != null) {
++        _controlLifecycle = _controlLifecycle.then((_) async {
++          await previous.shutdown();
++          previous.dispose();
++        });
+       }
 -      _subs.clear();
 -      _lastSample.clear();
 -      _publishStreaming();
 -    }
-   }
- 
-   Future<void> _init() async {
+-  }
+-
+-  Future<void> _init() async {
 -    final device = await DeviceManager.getPairedDevice();
-+    final device =
-+        widget.initialDevice ?? await DeviceManager.getPairedDevice();
-     if (!mounted) return;
-+    if (_device?.macAddress != device?.macAddress || _feed == null) {
+-    if (!mounted) return;
 +      _feed?.removeListener(_onFeed);
 +      _feed?.dispose();
++      _transport =
++          device == null
++              ? null
++              : widget.transport ?? ConnectedLiveTransport(device.macAddress);
 +      _feed =
 +          device == null
 +              ? null
 +              : LiveStreamController(
-+                widget.transport ?? ConnectedLiveTransport(device.macAddress),
++                _transport!,
 +                onSamples: (signal, values, breakBefore) {
 +                  if (!mounted || values.isEmpty) return;
 +                  final buffer = _buffer(signal);
@@ -555,13 +612,177 @@
 +    _restart();
 +  }
 +
-+  void _restart() {
++  void _restart({bool force = false}) {
 +    _lastSample.clear();
 +    _latest.clear();
 +    for (final buffer in _buffers.values) {
 +      buffer.clear();
 +    }
-+    unawaited(_feed?.select(!widget.active || _cm.isSmpBusy ? {} : _selected));
++    unawaited(
++      _feed?.select(
++        !widget.active || _cm.isSmpBusy
++            ? {}
++            : _transport?.hasResearch == true
++            ? LiveSignal.values.toSet()
++            : _selected,
++        force: force,
++      ),
++    );
++    _controlLifecycle = _controlLifecycle.then((_) async {
++      if (!mounted) return;
++      final enabled = widget.active && !_cm.isSmpBusy && _connected;
++      if (enabled && force && _controls != null && !_controls!.ready) {
++        final old = _controls!;
++        _controls = null;
++        old.removeListener(_onControls);
++        await old.shutdown();
++        old.dispose();
++      }
++      if (!enabled && _controls != null) {
++        final old = _controls!;
++        _controls = null;
++        old.removeListener(_onControls);
++        await old.shutdown();
++        old.dispose();
++        if (mounted) setState(() {});
++      } else if (enabled &&
++          _controls == null &&
++          _transport is ResearchControlTransport &&
++          _transport!.hasResearch) {
++        final controls = ResearchSessionController(_transport!);
++        _controls = controls;
++        controls.addListener(_onControls);
++        await controls.open();
++        if (mounted) setState(() {});
++      }
++    });
++  }
++
++  void _onControls() {
++    if (mounted) setState(() {});
++  }
++
++  Widget _sensorControls() {
++    final controls = _controls!;
++    final enabled = controls.ready && controls.supported && !controls.busy;
++    return Column(
++      crossAxisAlignment: CrossAxisAlignment.stretch,
++      children: [
++        Row(
++          children: [
++            Expanded(
++              child: TextButton.icon(
++                onPressed: () => _openSensorPanel(controls),
++                icon: const Icon(Icons.tune),
++                label: Text('Sensors ${controls.activeMask == 0 ? '' : 'ON'}'),
++              ),
++            ),
++            TextButton(
++              onPressed:
++                  enabled
++                      ? () => controls.setTargets(
++                        ResearchTarget.values,
++                        start: true,
++                      )
++                      : null,
++              child: const Text('Start all'),
++            ),
++            TextButton(
++              onPressed:
++                  enabled
++                      ? () => controls.setTargets(
++                        ResearchTarget.values,
++                        start: false,
++                      )
++                      : null,
++              child: const Text('Stop all'),
++            ),
++          ],
++        ),
++        if (controls.error != null)
++          SizedBox(
++            height: 44,
++            child: SingleChildScrollView(
++              child: Text(
++                controls.error!,
++                style: HpiText.supporting.copyWith(color: HpiColors.error),
++              ),
++            ),
++          ),
++      ],
++    );
++  }
++
++  void _openSensorPanel(ResearchSessionController controls) {
++    showModalBottomSheet<void>(
++      context: context,
++      showDragHandle: true,
++      builder:
++          (context) => AnimatedBuilder(
++            animation: controls,
++            builder: (context, _) {
++              final enabled =
++                  controls.ready && controls.supported && !controls.busy;
++              return SafeArea(
++                child: Padding(
++                  padding: const EdgeInsets.all(16),
++                  child: SingleChildScrollView(
++                    child: Column(
++                      mainAxisSize: MainAxisSize.min,
++                      crossAxisAlignment: CrossAxisAlignment.stretch,
++                      children: [
++                        Text('Continuous sensors', style: HpiText.sectionLabel),
++                        const SizedBox(height: 12),
++                        for (final target in ResearchTarget.values)
++                          Row(
++                            children: [
++                              Expanded(
++                                child: Text(
++                                  '${target.label}\n${controls.stateLabel(target)}',
++                                  style: HpiText.supporting,
++                                ),
++                              ),
++                              TextButton(
++                                onPressed:
++                                    enabled && !controls.active(target)
++                                        ? () => controls.setTargets([
++                                          target,
++                                        ], start: true)
++                                        : null,
++                                child: const Text('Start'),
++                              ),
++                              TextButton(
++                                onPressed:
++                                    enabled && controls.canStop(target)
++                                        ? () => controls.setTargets([
++                                          target,
++                                        ], start: false)
++                                        : null,
++                                child: const Text('Stop'),
++                              ),
++                            ],
++                          ),
++                        const SizedBox(height: 12),
++                        Text(
++                          'Wrist PPGs: green, red and IR. Finger PPGs: red and IR. '
++                          'Sensors can run together. Contact is required for usable signals.',
++                          style: HpiText.supporting,
++                        ),
++                        if (controls.error != null)
++                          Text(
++                            controls.error!,
++                            style: HpiText.supporting.copyWith(
++                              color: HpiColors.error,
++                            ),
++                          ),
++                      ],
++                    ),
++                  ),
++                ),
++              );
++            },
++          ),
++    );
    }
  
    Future<void> _connect() async {
@@ -810,7 +1031,7 @@
 +                if (_connected)
 +                  IconButton(
 +                    tooltip: 'Retry live streams',
-+                    onPressed: _restart,
++                    onPressed: () => _restart(force: true),
 +                    icon: const Icon(Symbols.refresh),
 +                  ),
 +              ],
@@ -818,6 +1039,7 @@
 +            if (!_connected)
                Expanded(child: _disconnected())
              else ...[
++              if (_controls != null) _sensorControls(),
                Expanded(child: _waveformCard(_primary)),
 -              if (expanded && _secondary != null) ...[
 -                const SizedBox(height: 12),
@@ -839,13 +1061,14 @@
 +              const SizedBox(height: 10),
 +              Text(
 +                'PPG is shown in raw counts with an adaptive scale. '
-+                'Use watch controls to start measurements.',
++                'Continuous mode runs until Stop. Keep this app foreground on Live; '
++                'leaving Live or disconnecting requests Stop. Live view does not save recordings.',
 +                style: HpiText.supporting,
 +              ),
              ],
            ],
          ),
-@@ -348,90 +318,71 @@
+@@ -348,90 +505,82 @@
      );
    }
  
@@ -911,9 +1134,20 @@
 +            : _feed?.errors[signal];
 +    final count = _feed?.sampleCounts[signal] ?? 0;
 +    final missing = _feed?.missingCounts[signal] ?? 0;
-+    final useResearch =
-+        signal.isPpg &&
-+        (widget.transport?.hasResearch ?? _cm.hasService(researchService));
++    final useResearch = _transport?.hasResearch == true;
++    final target =
++        signal == LiveSignal.ecg
++            ? ResearchTarget.ecg
++            : signal == LiveSignal.gsr
++            ? ResearchTarget.gsr
++            : signal.isFinger
++            ? ResearchTarget.finger
++            : ResearchTarget.wrist;
++    final waitingHint =
++        _controls == null
++            ? signal.waitingHint
++            : '${_controls!.stateLabel(target)}. Use Sensors to Start/Stop, '
++                'and maintain contact. Waiting for recent samples.';
      return HpiCard(
        waveform: true,
        padding: const EdgeInsets.all(12),
@@ -970,7 +1204,7 @@
 -                                  'stream here.\n${s.label} only runs during a '
 -                                  'spot check.'
 -                              : 'Waiting for ${s.label} data from the watch…',
-+                          error ?? signal.waitingHint,
++                          error ?? waitingHint,
                            textAlign: TextAlign.center,
                            style: HpiText.body.copyWith(
 -                              fontSize: 12, color: HpiColors.onSurfaceVariant),
@@ -983,7 +1217,7 @@
                          ),
                        ),
                      ),
-@@ -444,91 +395,28 @@
+@@ -444,91 +593,28 @@
      );
    }
  
@@ -1225,7 +1459,7 @@
          if (!connected && !_intentional && _state == LinkState.connected) {
 --- /dev/null
 +++ b/lib/utils/live_stream_controller.dart
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,242 @@
 +import 'dart:async';
 +
 +import 'package:flutter/foundation.dart';
@@ -1234,6 +1468,7 @@
 +import '../models/live_signal.dart';
 +import 'ble_manager.dart';
 +import 'connection_manager.dart';
++import 'research_session_controller.dart';
 +
 +typedef LiveRoute = ({String service, String characteristic});
 +
@@ -1246,22 +1481,41 @@
 +  Future<void> disable(LiveRoute route);
 +}
 +
-+class ConnectedLiveTransport implements LiveTransport {
++class ConnectedLiveTransport
++    implements LiveTransport, ResearchControlTransport {
 +  ConnectedLiveTransport(this.deviceId);
 +  final String deviceId;
 +  final _cm = ConnectionManager.instance;
 +  final _ble = BleManager.instance;
++  Future<void>? _pairing;
++  @override
++  Future<void> writeResearch(Uint8List bytes) => _ble.write(
++    deviceId,
++    researchService,
++    researchControl,
++    bytes,
++    withoutResponse: false,
++  );
++  @override
++  Future<Uint8List> readResearchStatus() =>
++      _ble.read(deviceId, researchService, researchStatus);
 +  @override
 +  bool get connected => _cm.isConnected && _cm.deviceId == deviceId;
 +  @override
 +  bool get hasResearch => connected && _cm.hasService(researchService);
 +  @override
-+  Future<void> pair() async {
-+    if (defaultTargetPlatform == TargetPlatform.android &&
-+        await _ble.isPaired(deviceId) != true) {
-+      await _ble.pair(deviceId);
++  Future<void> pair() => _pairing ??= _pair();
++  Future<void> _pair() async {
++    try {
++      if (defaultTargetPlatform == TargetPlatform.android &&
++          await _ble.isPaired(deviceId) != true) {
++        await _ble.pair(deviceId);
++      }
++      await _cm.requestMtu(247);
++    } catch (_) {
++      _pairing = null;
++      rethrow;
 +    }
-+    await _cm.requestMtu(247);
 +  }
 +
 +  @override
@@ -1293,8 +1547,15 @@
 +  bool _closed = false;
 +  bool get isStreaming => active.isNotEmpty;
 +
-+  Future<void> select(Set<LiveSignal> wanted) {
++  Future<void> select(Set<LiveSignal> wanted, {bool force = false}) {
 +    if (_closed) return Future.value();
++    if (!force &&
++        transport.connected &&
++        errors.isEmpty &&
++        setEquals(_wanted, wanted) &&
++        setEquals(active, wanted)) {
++      return _serial;
++    }
 +    _wanted = Set.of(wanted);
 +    final revision = ++_revision;
 +    active.clear();
@@ -1339,7 +1600,7 @@
 +        continue;
 +      }
 +      final route =
-+          signal.isPpg && transport.hasResearch
++          transport.hasResearch
 +              ? (service: researchService, characteristic: researchData)
 +              : (
 +                service: signal.legacyService,
@@ -1441,6 +1702,301 @@
 +    super.dispose();
 +  }
 +}
+--- /dev/null
++++ b/lib/utils/research_session_controller.dart
+@@ -0,0 +1,292 @@
++import 'dart:async';
++
++import 'package:flutter/foundation.dart';
++
++import '../ble/research_packet.dart';
++import 'live_stream_controller.dart';
++
++const researchControl = 'a17e0001-4d52-4f56-9100-524553454152';
++const researchStatus = 'a17e0002-4d52-4f56-9100-524553454152';
++const _statusRoute = (service: researchService, characteristic: researchStatus);
++
++abstract interface class ResearchControlTransport {
++  Future<void> writeResearch(Uint8List bytes);
++  Future<Uint8List> readResearchStatus();
++}
++
++enum ResearchTarget { ecg, gsr, wrist, finger }
++
++extension ResearchTargetInfo on ResearchTarget {
++  int get id => index + 1;
++  String get label => switch (this) {
++    ResearchTarget.ecg => 'ECG',
++    ResearchTarget.gsr => 'GSR',
++    ResearchTarget.wrist => 'Wrist PPGs',
++    ResearchTarget.finger => 'Finger PPGs',
++  };
++}
++
++class ResearchStatus {
++  ResearchStatus(Uint8List bytes) {
++    if (bytes.length != 20 ||
++        bytes[0] != 1 ||
++        bytes[3] > 4 ||
++        bytes[4] > 5 ||
++        bytes[5] > 7 ||
++        bytes[6] > 15) {
++      throw const FormatException('Invalid sensor status');
++    }
++    request = bytes[1];
++    opcode = bytes[2];
++    target = bytes[3];
++    result = bytes[4];
++    state = bytes[5];
++    mask = bytes[6];
++    continuousSupported = (bytes[7] & 2) != 0;
++    bootId = ByteData.sublistView(bytes).getUint32(8, Endian.little);
++    txFailures = ByteData.sublistView(bytes).getUint32(16, Endian.little);
++  }
++  late final int request,
++      opcode,
++      target,
++      result,
++      state,
++      mask,
++      bootId,
++      txFailures;
++  late final bool continuousSupported;
++}
++
++/// Commands are acknowledged by the watch, separately from sensor/contact state.
++/// Chart changes never stop a target. Leaving Live explicitly requests Stop.
++class ResearchSessionController extends ChangeNotifier {
++  ResearchSessionController(this.transport);
++  final LiveTransport transport;
++  final states = <ResearchTarget, int>{};
++  final _possiblyOwned = <ResearchTarget>{};
++  int activeMask = 0;
++  bool ready = false, supported = false, busy = false;
++  String? error;
++  int txFailures = 0;
++  int? _bootId;
++  int _nextId = 0;
++  bool _closed = false;
++  bool _shuttingDown = false;
++  StreamSubscription<Uint8List>? _subscription;
++  Future<void>? _opening;
++  final _pending =
++      <int, ({int opcode, int target, Completer<ResearchStatus> reply})>{};
++
++  bool active(ResearchTarget target) => (activeMask & (1 << target.index)) != 0;
++  bool canStop(ResearchTarget target) =>
++      active(target) || _possiblyOwned.contains(target);
++  String stateLabel(ResearchTarget target) => switch (states[target] ?? 0) {
++    1 => 'Starting',
++    2 => 'Waiting for contact',
++    3 => 'Streaming',
++    4 => 'Completed',
++    5 => 'Stopped',
++    6 => 'Sensor error',
++    7 => 'Stopping',
++    _ => active(target) ? 'Active' : 'Stopped',
++  };
++
++  void _notify() {
++    if (!_closed) notifyListeners();
++  }
++
++  void _accept(Uint8List bytes) {
++    try {
++      final status = ResearchStatus(bytes);
++      if (_bootId != null && _bootId != status.bootId) {
++        states.clear();
++        _possiblyOwned.clear();
++        error = 'Watch restarted. Check contact and press Start again.';
++        for (final request in _pending.values) {
++          if (!request.reply.isCompleted) {
++            request.reply.completeError(StateError('Watch restarted'));
++          }
++        }
++        _pending.clear();
++      }
++      _bootId = status.bootId;
++      supported = status.continuousSupported;
++      activeMask = status.mask;
++      txFailures = status.txFailures;
++      if (status.target != 0) {
++        final target = ResearchTarget.values[status.target - 1];
++        states[target] = status.state;
++        if (status.state >= 4 && status.state <= 6 && !active(target)) {
++          _possiblyOwned.remove(target);
++        }
++      }
++      final pending = _pending[status.request];
++      if (pending != null &&
++          pending.opcode == status.opcode &&
++          pending.target == status.target) {
++        _pending.remove(status.request);
++        pending.reply.complete(status);
++      }
++      _notify();
++    } on FormatException catch (e) {
++      error = '$e';
++      _notify();
++    }
++  }
++
++  Future<void> open() => _opening ??= _open();
++  Future<void> _open() async {
++    if (_closed ||
++        !transport.connected ||
++        !transport.hasResearch ||
++        transport is! ResearchControlTransport) {
++      return;
++    }
++    try {
++      await transport.pair().timeout(const Duration(seconds: 30));
++      if (_closed) return;
++      _subscription = transport
++          .values(_statusRoute)
++          .listen(
++            _accept,
++            onError: (Object e) {
++              ready = false;
++              error = 'Sensor controls disconnected: $e';
++              _notify();
++            },
++          );
++      await transport.enable(_statusRoute).timeout(const Duration(seconds: 10));
++      _accept(
++        await (transport as ResearchControlTransport)
++            .readResearchStatus()
++            .timeout(const Duration(seconds: 10)),
++      );
++      ready = true;
++      if (!supported) {
++        error = 'Install firmware 3.1.2-continuous for continuous Start/Stop.';
++      }
++    } catch (e) {
++      error = 'Could not open sensor controls: $e';
++    }
++    _notify();
++  }
++
++  Future<ResearchStatus> _command(int opcode, ResearchTarget target) async {
++    if (!transport.connected) throw StateError('Watch is disconnected');
++    final id = _nextId = _nextId % 255 + 1;
++    final reply = Completer<ResearchStatus>();
++    _pending[id] = (opcode: opcode, target: target.id, reply: reply);
++    // Attach timeout before the write so an early status/reboot cannot leave an
++    // unhandled error; write success alone never counts as sensor success.
++    final response = reply.future.timeout(const Duration(seconds: 8));
++    // The write and reply can fail independently, including while a write is
++    // still pending. Attach an error handler immediately to both paths.
++    unawaited(response.then<void>((_) {}, onError: (Object _) {}));
++    try {
++      await (transport as ResearchControlTransport)
++          .writeResearch(Uint8List.fromList([1, opcode, target.id, id]))
++          .timeout(const Duration(seconds: 8));
++    } catch (e) {
++      _pending.remove(id);
++      if (!reply.isCompleted) reply.completeError(e);
++    }
++    try {
++      final status = await response;
++      if (status.result != 0) {
++        throw StateError(switch (status.result) {
++          1 => 'Watch is busy with another measurement',
++          3 => 'This measurement belongs to another connection',
++          4 => 'Continuous mode is unsupported',
++          5 => 'Firmware update is active',
++          _ => 'Watch rejected the command',
++        });
++      }
++      return status;
++    } finally {
++      _pending.remove(id);
++    }
++  }
++
++  Future<void> setTargets(
++    Iterable<ResearchTarget> targets, {
++    required bool start,
++  }) async {
++    if (busy || _closed || (start && _shuttingDown)) return;
++    busy = true;
++    error = null;
++    _notify();
++    try {
++      await open();
++      if (!ready || !supported) {
++        throw StateError('Firmware 3.1.2-continuous is required');
++      }
++      final failures = <String>[];
++      for (final target in targets) {
++        if (start && _shuttingDown) break;
++        if (!start && !active(target) && !_possiblyOwned.contains(target)) {
++          continue;
++        }
++        if (start) _possiblyOwned.add(target);
++        try {
++          await _command(start ? 4 : 2, target);
++        } catch (e) {
++          failures.add('${target.label}: $e');
++        }
++      }
++      if (failures.isNotEmpty) error = failures.join('\n');
++    } catch (e) {
++      error = '$e';
++    } finally {
++      busy = false;
++      _notify();
++    }
++  }
++
++  /// Best-effort teardown; disconnect is also a firmware-side Stop fail-safe.
++  Future<void> shutdown() async {
++    _shuttingDown = true;
++    // A Start may still be awaiting its acknowledgement. Keep status subscribed
++    // until it settles, then stop every target known to be active.
++    while (busy && transport.connected && !_closed) {
++      await Future<void>.delayed(const Duration(milliseconds: 50));
++    }
++    if (!_closed && ready && transport.connected) {
++      await setTargets(ResearchTarget.values, start: false);
++      final deadline = DateTime.now().add(const Duration(seconds: 8));
++      while (activeMask != 0 &&
++          transport.connected &&
++          DateTime.now().isBefore(deadline)) {
++        await Future<void>.delayed(const Duration(milliseconds: 100));
++      }
++      if (activeMask != 0 && transport.connected) {
++        error =
++            'The watch has not confirmed Stop. Disconnect to request cancellation.';
++      }
++    }
++    await _subscription?.cancel();
++    _subscription = null;
++    if (transport.connected) {
++      try {
++        await transport
++            .disable(_statusRoute)
++            .timeout(const Duration(seconds: 5));
++      } catch (_) {
++        /* Link loss removes subscriptions and cancels remote streams. */
++      }
++    }
++    ready = false;
++  }
++
++  @override
++  void dispose() {
++    _closed = true;
++    unawaited(_subscription?.cancel());
++    for (final request in _pending.values) {
++      if (!request.reply.isCompleted) {
++        request.reply.completeError(StateError('Controls closed'));
++      }
++    }
++    _pending.clear();
++    super.dispose();
++  }
++}
 --- a/pubspec.lock
 +++ b/pubspec.lock
 @@ -517,10 +517,10 @@
@@ -1510,10 +2066,81 @@
  description: "HealthyPi Move"
  publish_to: 'none'
 -version: 3.0.8+96
-+version: 3.0.9+97
++version: 3.0.10+98
  
  environment:
    sdk: ^3.7.0
+--- /dev/null
++++ b/test/continuous_screen_test.dart
+@@ -0,0 +1,68 @@
++import 'package:flutter/material.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:move/models/device_info.dart';
++import 'package:move/screens/scr_live.dart';
++import 'package:move/theme/hpi_theme.dart';
++
++import 'research_session_controller_test.dart' show FakeControlTransport;
++
++void main() {
++  testWidgets(
++    'phone can start all sensors, show independent controls, and stop on leaving Live',
++    (tester) async {
++      tester.view.physicalSize = const Size(360, 640);
++      tester.view.devicePixelRatio = 1;
++      addTearDown(tester.view.resetPhysicalSize);
++      addTearDown(tester.view.resetDevicePixelRatio);
++      final transport = FakeControlTransport();
++      Widget screen(bool active) => MaterialApp(
++        theme: HpiTheme.dark(),
++        home: Scaffold(
++          body: ScrLive(
++            active: active,
++            transport: transport,
++            initialDevice: DeviceInfo(
++              macAddress: 'watch',
++              deviceName: 'Test watch',
++              firstPaired: DateTime(2026),
++            ),
++          ),
++        ),
++      );
++      await tester.pumpWidget(screen(true));
++      await tester.pumpAndSettle();
++      await tester.tap(find.text('Start all'));
++      await tester.pumpAndSettle();
++      expect(transport.mask, 15);
++      await tester.tap(find.text('Sensors ON'));
++      await tester.pumpAndSettle();
++      expect(find.text('Continuous sensors'), findsOneWidget);
++      expect(find.textContaining('ECG\nWaiting for contact'), findsOneWidget);
++      expect(find.textContaining('GSR\nWaiting for contact'), findsOneWidget);
++      expect(tester.takeException(), isNull);
++      // Close the panel, compare two traces, and verify the phone layout.
++      await tester.tapAt(const Offset(20, 40));
++      await tester.pumpAndSettle();
++      await tester.tap(find.byType(Switch));
++      await tester.pumpAndSettle();
++      expect(
++        transport.commands.length,
++        4,
++      ); // Chart changes did not restart sensors.
++      expect(tester.takeException(), isNull);
++      await tester.pumpWidget(screen(false));
++      await tester.pump();
++      await tester.runAsync(
++        () => Future<void>.delayed(const Duration(milliseconds: 50)),
++      );
++      await tester.pumpAndSettle();
++      expect(transport.mask, 0);
++      expect(transport.commands.where((c) => c[1] == 2).length, 4);
++      await tester.pumpWidget(const SizedBox());
++      await tester.runAsync(
++        () => Future<void>.delayed(const Duration(milliseconds: 20)),
++      );
++      await tester.pump();
++    },
++  );
++}
 --- /dev/null
 +++ b/test/live_screen_test.dart
 @@ -0,0 +1,101 @@
@@ -1676,7 +2303,7 @@
 +      await feed.select({LiveSignal.wristRed});
 +      await feed.select({LiveSignal.wristRed, LiveSignal.ecg});
 +      expect(feed.active, {LiveSignal.wristRed, LiveSignal.ecg});
-+      expect(transport.enabled.length, 4);
++      expect(transport.enabled.length, 3);
 +      feed.dispose();
 +    },
 +  );
@@ -1857,5 +2484,174 @@
 +      () => LiveSignal.fingerIr.decodeLegacy(Uint8List(3)),
 +      throwsFormatException,
 +    );
++  });
++}
+--- /dev/null
++++ b/test/research_session_controller_test.dart
+@@ -0,0 +1,166 @@
++import 'dart:typed_data';
++
++import 'package:flutter_test/flutter_test.dart';
++import 'package:move/ble/research_packet.dart';
++import 'package:move/utils/research_session_controller.dart';
++
++import 'live_stream_controller_test.dart' show FakeLiveTransport;
++
++class FakeControlTransport extends FakeLiveTransport
++    implements ResearchControlTransport {
++  bool supportsContinuous = true;
++  bool acknowledge = true;
++  int mask = 0, result = 0, boot = 42;
++  final commands = <List<int>>[];
++  Uint8List status({
++    int id = 0,
++    int opcode = 0,
++    int target = 0,
++    int state = 0,
++  }) {
++    final bytes = Uint8List(20);
++    bytes.setAll(0, [
++      1,
++      id,
++      opcode,
++      target,
++      result,
++      state,
++      mask,
++      supportsContinuous ? 3 : 1,
++    ]);
++    ByteData.sublistView(bytes).setUint32(8, boot, Endian.little);
++    return bytes;
++  }
++
++  void publish(Uint8List bytes) =>
++      streams[(service: researchService, characteristic: researchStatus)]!.add(
++        bytes,
++      );
++  @override
++  Future<Uint8List> readResearchStatus() async => status();
++  @override
++  Future<void> writeResearch(Uint8List bytes) async {
++    commands.add(bytes.toList());
++    if (!acknowledge) return;
++    if (result == 0) {
++      if (bytes[1] == 4) mask |= 1 << (bytes[2] - 1);
++      if (bytes[1] == 2) mask &= ~(1 << (bytes[2] - 1));
++    }
++    publish(
++      status(
++        id: bytes[3],
++        opcode: bytes[1],
++        target: bytes[2],
++        state: bytes[1] == 4 ? 2 : 5,
++      ),
++    );
++  }
++}
++
++void main() {
++  test(
++    'start all enables four independent targets; stopping ECG retains others',
++    () async {
++      final transport = FakeControlTransport();
++      final controls = ResearchSessionController(transport);
++      await controls.setTargets(ResearchTarget.values, start: true);
++      expect(transport.commands.map((c) => c.take(3).toList()), [
++        [1, 4, 1],
++        [1, 4, 2],
++        [1, 4, 3],
++        [1, 4, 4],
++      ]);
++      expect(controls.activeMask, 15);
++      expect(controls.stateLabel(ResearchTarget.ecg), 'Waiting for contact');
++      await controls.setTargets([ResearchTarget.ecg], start: false);
++      expect(controls.activeMask, 14);
++      expect(controls.stateLabel(ResearchTarget.ecg), 'Stopped');
++      await controls.shutdown();
++      expect(transport.mask, 0);
++      controls.dispose();
++    },
++  );
++
++  test('old firmware cannot accidentally run a finite spot check', () async {
++    final transport = FakeControlTransport()..supportsContinuous = false;
++    final controls = ResearchSessionController(transport);
++    await controls.setTargets([ResearchTarget.ecg], start: true);
++    expect(controls.supported, false);
++    expect(controls.error, contains('3.1.2-continuous'));
++    expect(transport.commands, isEmpty);
++    await controls.shutdown();
++    controls.dispose();
++  });
++
++  test(
++    'watch busy is reported and other requested targets are attempted',
++    () async {
++      final transport = FakeControlTransport()..result = 1;
++      final controls = ResearchSessionController(transport);
++      await controls.setTargets([
++        ResearchTarget.ecg,
++        ResearchTarget.gsr,
++      ], start: true);
++      expect(transport.commands.length, 2);
++      expect(controls.activeMask, 0);
++      expect(controls.error, contains('busy'));
++      await controls.shutdown();
++      controls.dispose();
++    },
++  );
++
++  test(
++    'write acknowledgement alone never implies a streaming sensor',
++    () async {
++      final transport = FakeControlTransport()..acknowledge = false;
++      final controls = ResearchSessionController(transport);
++      await controls.open();
++      final operation = controls.setTargets([ResearchTarget.ecg], start: true);
++      await Future<void>.delayed(Duration.zero);
++      expect(controls.busy, true);
++      expect(controls.activeMask, 0);
++      final command = transport.commands.single;
++      transport.mask = 1;
++      transport.publish(
++        transport.status(id: command[3], opcode: 4, target: 2, state: 1),
++      );
++      expect(
++        controls.busy,
++        true,
++      ); // Wrong target is not a matching acknowledgement.
++      transport.publish(
++        transport.status(id: command[3], opcode: 4, target: 1, state: 1),
++      );
++      await operation;
++      expect(controls.stateLabel(ResearchTarget.ecg), 'Starting');
++      transport.acknowledge = true;
++      await controls.shutdown();
++      controls.dispose();
++    },
++  );
++
++  test(
++    'sensor reboot clears prior states and does not restart measurements',
++    () async {
++      final transport = FakeControlTransport();
++      final controls = ResearchSessionController(transport);
++      await controls.setTargets([ResearchTarget.ecg], start: true);
++      transport.boot++;
++      transport.mask = 0;
++      transport.publish(transport.status());
++      expect(controls.activeMask, 0);
++      expect(controls.error, contains('restarted'));
++      expect(transport.commands.length, 1);
++      await controls.shutdown();
++      controls.dispose();
++    },
++  );
++
++  test('malformed status is rejected', () {
++    expect(() => ResearchStatus(Uint8List(19)), throwsFormatException);
++    final transport = FakeControlTransport();
++    final bytes = transport.status()..[5] = 99;
++    expect(() => ResearchStatus(bytes), throwsFormatException);
 +  });
 +}

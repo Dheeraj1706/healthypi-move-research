@@ -508,12 +508,14 @@ static int max30001_attr_set(const struct device *dev,
             if (ret != 0) {
                 return ret;
             }
-            max30001_fifo_reset(dev);
-            max30001_synch(dev);
+            if (!data->chip_cfg.reg_cnfg_gen.bit.en_bioz) {
+                max30001_fifo_reset(dev);
+                max30001_synch(dev);
+            }
         }
         else if (val->val1 == 0)
         {
-            max30001_fifo_reset(dev);
+            if (!data->chip_cfg.reg_cnfg_gen.bit.en_bioz) { max30001_fifo_reset(dev); }
             int ret = max30001_enable_ecg(dev, false);
             if (ret != 0) {
                 return ret;
@@ -527,12 +529,14 @@ static int max30001_attr_set(const struct device *dev,
             if (ret != 0) {
                 return ret;
             }
-            max30001_fifo_reset(dev);
-            max30001_synch(dev);
+            if (!data->chip_cfg.reg_cnfg_gen.bit.en_ecg) {
+                max30001_fifo_reset(dev);
+                max30001_synch(dev);
+            }
         }
         else if (val->val1 == 0)
         {
-            max30001_fifo_reset(dev);
+            if (!data->chip_cfg.reg_cnfg_gen.bit.en_ecg) { max30001_fifo_reset(dev); }
             int ret = max30001_enable_bioz(dev, false);
             if (ret != 0) {
                 return ret;

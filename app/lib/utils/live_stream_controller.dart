@@ -6,6 +6,7 @@ import '../ble/research_packet.dart';
 import '../models/live_signal.dart';
 import 'ble_manager.dart';
 import 'connection_manager.dart';
+import 'research_session_controller.dart';
 
 typedef LiveRoute = ({String service, String characteristic});
 
@@ -18,22 +19,41 @@ abstract interface class LiveTransport {
   Future<void> disable(LiveRoute route);
 }
 
-class ConnectedLiveTransport implements LiveTransport {
+class ConnectedLiveTransport
+    implements LiveTransport, ResearchControlTransport {
   ConnectedLiveTransport(this.deviceId);
   final String deviceId;
   final _cm = ConnectionManager.instance;
   final _ble = BleManager.instance;
+  Future<void>? _pairing;
+  @override
+  Future<void> writeResearch(Uint8List bytes) => _ble.write(
+    deviceId,
+    researchService,
+    researchControl,
+    bytes,
+    withoutResponse: false,
+  );
+  @override
+  Future<Uint8List> readResearchStatus() =>
+      _ble.read(deviceId, researchService, researchStatus);
   @override
   bool get connected => _cm.isConnected && _cm.deviceId == deviceId;
   @override
   bool get hasResearch => connected && _cm.hasService(researchService);
   @override
-  Future<void> pair() async {
-    if (defaultTargetPlatform == TargetPlatform.android &&
-        await _ble.isPaired(deviceId) != true) {
-      await _ble.pair(deviceId);
+  Future<void> pair() => _pairing ??= _pair();
+  Future<void> _pair() async {
+    try {
+      if (defaultTargetPlatform == TargetPlatform.android &&
+          await _ble.isPaired(deviceId) != true) {
+        await _ble.pair(deviceId);
+      }
+      await _cm.requestMtu(247);
+    } catch (_) {
+      _pairing = null;
+      rethrow;
     }
-    await _cm.requestMtu(247);
   }
 
   @override
@@ -65,8 +85,15 @@ class LiveStreamController extends ChangeNotifier {
   bool _closed = false;
   bool get isStreaming => active.isNotEmpty;
 
-  Future<void> select(Set<LiveSignal> wanted) {
+  Future<void> select(Set<LiveSignal> wanted, {bool force = false}) {
     if (_closed) return Future.value();
+    if (!force &&
+        transport.connected &&
+        errors.isEmpty &&
+        setEquals(_wanted, wanted) &&
+        setEquals(active, wanted)) {
+      return _serial;
+    }
     _wanted = Set.of(wanted);
     final revision = ++_revision;
     active.clear();
@@ -111,7 +138,7 @@ class LiveStreamController extends ChangeNotifier {
         continue;
       }
       final route =
-          signal.isPpg && transport.hasResearch
+          transport.hasResearch
               ? (service: researchService, characteristic: researchData)
               : (
                 service: signal.legacyService,

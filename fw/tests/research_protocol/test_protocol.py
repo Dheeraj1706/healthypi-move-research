@@ -16,6 +16,7 @@ class ProtocolTests(unittest.TestCase):
     def test_commands(self):
         self.assertEqual(command("start", "ecg", 7), bytes([1, 1, 1, 7]))
         self.assertEqual(command("stop", "finger_spo2", 8), bytes([1, 2, 4, 8]))
+        self.assertEqual(command("continuous", "gsr", 9), bytes([1, 4, 2, 9]))
         with self.assertRaises(ValueError): command("start", 0)
         with self.assertRaises(ValueError): command("status", 0, 0)
 
@@ -44,6 +45,11 @@ class ProtocolTests(unittest.TestCase):
         status = decode_status(struct.pack("<8BIII", 1, 7, 1, 1, 0, 2, 1, 1, 42, 999, 0))
         self.assertEqual(status["state"], "waiting_for_contact")
         self.assertEqual(status["request_id"], 7)
+
+    def test_continuous_capability_and_simultaneous_mask(self):
+        status = decode_status(struct.pack("<8BIII", 1, 9, 4, 2, 0, 3, 15, 3, 42, 999, 0))
+        self.assertTrue(status["continuous_supported"])
+        self.assertEqual(status["active_mask"], 15)
 
     def test_additional_ppg_channels(self):
         for signal, name, hz in ((9, "ppg_wrist_red", 25),

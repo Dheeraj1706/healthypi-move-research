@@ -1,0 +1,59 @@
+{
+  "application_version": "3.1.2-continuous",
+  "mcuboot_version": "3.1.2+0",
+  "ncs": "3.4.0",
+  "board": "healthypi_move/nrf5340/cpuapp",
+  "target_build": "passed",
+  "python_protocol_tests_passed": 10,
+  "host_c_wire_and_control_policy_tests": "passed with -Wall -Wextra -Werror",
+  "ota_crc_manifest_and_size_checks": "passed",
+  "signed_images": {
+    "app.signed.bin": {
+      "signature": "verified",
+      "version": [
+        3,
+        1,
+        2,
+        0
+      ]
+    },
+    "ipc_radio.bin": {
+      "signature": "verified",
+      "version": [
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  "app_signed_bytes": 786447,
+  "app_static_ram_used_bytes": 446416,
+  "app_ram_region_bytes": 450560,
+  "hardware_tested": false,
+  "long_duration_tested": false,
+  "installed_watch_signing_key_compatibility_verified": false,
+  "continuous_targets": [
+    "ecg",
+    "gsr",
+    "wrist_ppgs",
+    "finger_ppgs"
+  ],
+  "file": {
+    "name": "HealthyPi_Move_3.1.2_Continuous_OTA.zip",
+    "bytes": 939465,
+    "sha256": "5e463492e33a4c308c6e19cf58bd7353b7a677689944cb9b235786aa013e3952"
+  },
+  "sources": {
+    "app/VERSION": "8667a7db1488324aad5144b17d8d4c1fbaa280d69a4415e037d409901945d352",
+    "app/src/hpi_research.c": "3a692720a4661ba562628f92ca3c5c0d3a9ec2672d0cf82ecc4e68d58a71fd1e",
+    "app/src/hpi_research.h": "e7e5eddf20bcaf638f3724eb0f499f96ff83c3b0440791d30c6b6307148da466",
+    "app/src/hpi_research_policy.h": "fd357b72fa0c481e30e1f2e91f058f2e98c6ce1104dbb5e2aa607f12e3ca2480",
+    "app/src/hpi_research_wire.h": "f59273e3638fe7b5294f1a6d68583d0b4b1468a76eb64e0a348ae01c4f944794",
+    "app/src/sm/smf_ecg_bioz.c": "dd13a30643edeb5ffebcc7be218dba371f25c0626b42a507746006de21bc92e7",
+    "app/src/sm/smf_ppg_wrist.c": "30b2f50fe834a03b6f7af2203ff3b6ff9ef46f94ce2a107ddc63ccefb9a709a8",
+    "app/src/sm/smf_ppg_finger.c": "0ea98a1a73c9a69fa4ceb5e6cebcd603bb9f6d0b1e5369ef516e9ad9688bd531",
+    "drivers/sensor/max30001/max30001.c": "5509c466bbf2f96a3ce4bd8b0105fb1beedeba01358fc556db3ce28af884bb74",
+    "drivers/sensor/max30001/max30001_async.c": "9aa5c580a65f28f4248efe7422a5290e7b0015e8a376ff36acb7f5b88bb6fe23"
+  }
+}

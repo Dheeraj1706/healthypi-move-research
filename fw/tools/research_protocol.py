@@ -18,7 +18,7 @@ RESULTS = {0: "accepted", 1: "busy", 2: "invalid", 3: "not_owner",
 
 
 def command(action, target=0, request_id=1):
-    opcode = {"start": 1, "stop": 2, "status": 3}[action]
+    opcode = {"start": 1, "stop": 2, "status": 3, "continuous": 4}[action]
     target = TARGETS[target] if isinstance(target, str) else target
     if target not in range(5) or (opcode != 3 and target == 0):
         raise ValueError("Invalid measurement target")
@@ -36,7 +36,7 @@ def decode_status(payload):
         raise ValueError("Invalid status fields")
     return dict(version=version, request_id=rid, opcode=opcode, target=target,
                 result=RESULTS[result], state=STATES[state], active_mask=mask,
-                flags=flags, boot_id=boot, uptime_ms=uptime, tx_failures=failures)
+                flags=flags, continuous_supported=bool(flags & 2), boot_id=boot, uptime_ms=uptime, tx_failures=failures)
 
 
 def decode_data(payload):

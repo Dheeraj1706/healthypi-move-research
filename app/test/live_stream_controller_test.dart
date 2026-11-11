@@ -53,7 +53,7 @@ void main() {
       await feed.select({LiveSignal.wristRed});
       await feed.select({LiveSignal.wristRed, LiveSignal.ecg});
       expect(feed.active, {LiveSignal.wristRed, LiveSignal.ecg});
-      expect(transport.enabled.length, 4);
+      expect(transport.enabled.length, 3);
       feed.dispose();
     },
   );
