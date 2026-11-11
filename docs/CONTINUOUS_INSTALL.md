@@ -1,8 +1,8 @@
 # HealthyPi Move continuous research build
 
-Matching pair: Android app 3.0.10+98 and watch firmware 3.1.2-continuous.
+Matching pair: Android app 3.0.11+99 and watch firmware 3.1.2-continuous.
 
-1. Install `app/HealthyPi_Move_Continuous_3.0.10.apk` on the phone. It updates
+1. Install `app/HealthyPi_Move_Continuous_StartupFix_3.0.11.apk` on the phone. It updates
    the previous HealthyPi Move PPG research app (same ID and signing certificate).
 2. In the phone firmware updater, choose the local firmware ZIP via Advanced
    options / Select firmware file: `firmware/HealthyPi_Move_3.1.2_Continuous_OTA.zip`.

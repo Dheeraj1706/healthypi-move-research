@@ -10,16 +10,25 @@ commits, licenses and the exact changed files are recorded below and in
 features have been built and checked with automated tests; they have not yet
 been validated as a complete system on a physical watch and phone.
 
+## Android startup fix
+
+Use app **3.0.11+99** in place of 3.0.10. The preceding APK had no native
+Android plugin registration calls, preventing startup. The replacement has
+all nine registrations, a build guard against missing core plugins, and a
+visible startup progress/error/retry screen. Packaged DEX checks confirm the
+registration fix. A physical phone cold start remains to be verified.
+Firmware 3.1.2-continuous is unchanged. See [details](app/docs/STARTUP_FIX.md).
+
 ## Continuous acquisition update
 
-The matching research versions are **app 3.0.10+98** and **firmware
+The matching research versions are **app 3.0.11+99** and **firmware
 3.1.2-continuous**. Live now offers Start all / Stop all and individual ECG,
 GSR, wrist PPG and finger PPG controls. Continuous research mode bypasses the
 30-second spot-check cutoff; chart changes do not restart acquisition. The app
 checks firmware capability and shows command rejection, contact and stopping
 states. All seven waveforms share one encrypted research data subscription.
 
-**Validation:** 33 targeted Flutter tests and changed-file analysis passed;
+**Validation:** 36 targeted Flutter tests and changed-file analysis passed;
 10 Python protocol tests and host C wire/control-policy checks passed; Android
 release and Nordic target builds passed. APK signature/alignment and OTA image
 signature/manifest checks passed. Physical simultaneous acquisition and 3–5 hour
@@ -57,7 +66,7 @@ the preceding PPG-only release.
   acquisition path forwards BioZ from the shared FIFO read. Wrist selects the
   hub's continuous HR+SpO2 mode. These changes still need hardware validation.
 
-**Flutter Android app, version `3.0.10+98`:**
+**Flutter Android app, version `3.0.11+99`:**
 
 - Live selection of ECG, GSR, wrist green/red/IR and finger IR/red PPG.
 - Two-graph Compare mode on phones and tablets, adaptive PPG scaling, sample
@@ -88,7 +97,7 @@ been integrated with the new research protocol or the extra PPG channels.
 | Firmware reference protocol | 10 Python tests and host C encoder/control-policy checks passed |
 | Nordic target build | NCS 3.4.0 build completed; both MCUboot image signatures checked |
 | Firmware memory | Signed app 786,447 bytes; static RAM 446,416 / 450,560 bytes (99.08%) |
-| Flutter | Changed files passed analysis; 33 targeted tests passed |
+| Flutter | Changed files passed analysis; 36 targeted tests passed |
 | Android APK | Release build, signature, package identity, CRC and alignment checks passed |
 | Physical phone/watch integration | Pending |
 | Finger PPG recording validation | Pending |

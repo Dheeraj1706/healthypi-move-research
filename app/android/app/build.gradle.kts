@@ -86,3 +86,27 @@ android {
 flutter {
     source = "../.."
 }
+
+// A release can compile with an empty generated registrant, but then native
+// BLE/preferences/database calls fail before the app opens. Fail the build.
+val verifyNativePluginRegistration by tasks.registering {
+    doLast {
+        val registrant = file("src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java")
+        check(registrant.isFile) { "Run flutter pub get before building: plugin registration is missing." }
+        val source = registrant.readText()
+        val required = listOf(
+            "com.navideck.universal_ble.UniversalBlePlugin",
+            "io.flutter.plugins.sharedpreferences.SharedPreferencesPlugin",
+            "com.tekartik.sqflite.SqflitePlugin",
+            "io.flutter.plugins.pathprovider.PathProviderPlugin",
+        )
+        required.forEach { plugin ->
+            check(source.contains("getPlugins().add(new $plugin(")) {
+                "Missing native registration for $plugin. Run flutter pub get and rebuild."
+            }
+        }
+    }
+}
+tasks.withType<org.gradle.api.tasks.compile.JavaCompile>().configureEach {
+    dependsOn(verifyNativePluginRegistration)
+}

@@ -1,0 +1,29 @@
+{
+  "version": "3.0.11+99",
+  "application_id": "com.protocentral.move.research",
+  "apk": "HealthyPi_Move_Continuous_StartupFix_3.0.11.apk",
+  "bytes": 62913059,
+  "sha256": "cb34d26a2073e40925ee04fa7354097dc9775404909d06e707fb913fa51942a2",
+  "certificate_sha256": "b5a7eaa7cc4288cc0d574c4b9eb1caf00ef2aec7ccd92fc1edd2115b492e0dec",
+  "certificate_matches_preceding_research_apk": true,
+  "release_build": "passed",
+  "changed_dart_analysis": "passed",
+  "targeted_tests_passed": 36,
+  "native_registration_guard_negative_test": "passed",
+  "old_apk_native_registration_count": 0,
+  "new_apk_native_registration_count": 9,
+  "verified_packaged_native_plugins": [
+    "dev/flutter/packages/file_selector_android/FileSelectorAndroidPlugin",
+    "com/kineapps/flutterarchive/FlutterArchivePlugin",
+    "dev/fluttercommunity/plus/packageinfo/PackageInfoPlugin",
+    "io/flutter/plugins/pathprovider/PathProviderPlugin",
+    "dev/fluttercommunity/plus/share/SharePlusPlugin",
+    "io/flutter/plugins/sharedpreferences/SharedPreferencesPlugin",
+    "com/tekartik/sqflite/SqflitePlugin",
+    "com/navideck/universal_ble/UniversalBlePlugin",
+    "io/flutter/plugins/urllauncher/UrlLauncherPlugin"
+  ],
+  "signature_alignment_crc_identity_checks": "passed",
+  "firmware_changes": false,
+  "phone_cold_start_tested": false
+}

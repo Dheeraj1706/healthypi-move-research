@@ -27,6 +27,34 @@
          // You can update the following values to match your application needs.
          // For more information, see: https://flutter.dev/to/review-gradle-config.
          minSdk = flutter.minSdkVersion
+@@ -86,3 +86,27 @@
+ flutter {
+     source = "../.."
+ }
++
++// A release can compile with an empty generated registrant, but then native
++// BLE/preferences/database calls fail before the app opens. Fail the build.
++val verifyNativePluginRegistration by tasks.registering {
++    doLast {
++        val registrant = file("src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java")
++        check(registrant.isFile) { "Run flutter pub get before building: plugin registration is missing." }
++        val source = registrant.readText()
++        val required = listOf(
++            "com.navideck.universal_ble.UniversalBlePlugin",
++            "io.flutter.plugins.sharedpreferences.SharedPreferencesPlugin",
++            "com.tekartik.sqflite.SqflitePlugin",
++            "io.flutter.plugins.pathprovider.PathProviderPlugin",
++        )
++        required.forEach { plugin ->
++            check(source.contains("getPlugins().add(new $plugin(")) {
++                "Missing native registration for $plugin. Run flutter pub get and rebuild."
++            }
++        }
++    }
++}
++tasks.withType<org.gradle.api.tasks.compile.JavaCompile>().configureEach {
++    dependsOn(verifyNativePluginRegistration)
++}
 --- a/android/app/src/main/AndroidManifest.xml
 +++ b/android/app/src/main/AndroidManifest.xml
 @@ -33,7 +33,7 @@
@@ -134,6 +162,37 @@
 +The research APK uses the project's local Android signing fallback for personal
 +installation; it is not a Play Store release and cannot update the official app.
 --- /dev/null
++++ b/docs/STARTUP_FIX.md
+@@ -0,0 +1,28 @@
++# Android startup fix — 3.0.11+99
++
++The preceding 3.0.10 APK was built with an empty native Android plugin
++registrant. Its compiled `registerWith(FlutterEngine)` method contained only a
++return instruction. `main()` awaited native Bluetooth and local storage calls
++before `runApp()`, so a missing-plugin error prevented the first Flutter screen.
++Widget tests of the Live screen did not cover native Android registration.
++
++Version 3.0.11 regenerates all nine Android native plugin registrations through
++Flutter's dependency preparation. The Android build now rejects a registrant
++missing Bluetooth, preferences, SQLite or path-provider initialization. Run
++`flutter pub get` before building; use the normal `flutter build apk --release`
++flow. Do not reuse stale generated files with an unchecked `--no-pub` build.
++
++The entry point also mounts a startup UI before initialization. It shows progress
++while preparing Bluetooth/local data, and displays the actual error with Retry
++if initialization fails. Main data screens remain behind successful preparation,
++preserving real-data filtering. It does not clear user storage or require an
++uninstall. App identity and signing certificate match the previous research APK.
++
++Validation includes three bootstrap widget tests and the preceding 33 targeted
++Live/protocol/controller tests; changed-file analysis; a negative Gradle test
++with an empty registrant; and release artifact checks for native registration,
++identity, signing and alignment. No connected phone was available for a physical
++cold-start test. A successful build is not a physical phone/watch test.
++
++Firmware 3.1.2-continuous is unchanged and does not need to be reinstalled for
++this Android startup fix.
+--- /dev/null
 +++ b/lib/ble/research_packet.dart
 @@ -0,0 +1,76 @@
 +import 'dart:typed_data';
@@ -211,6 +270,71 @@
 +    );
 +    return (missing: missing, reset: reset);
 +  }
++}
+--- a/lib/main.dart
++++ b/lib/main.dart
+@@ -10,12 +10,16 @@
+ import 'screens/scr_blood_pressure.dart';
+ import 'theme/hpi_theme.dart';
+ import 'ui/components/hpi_synthetic_banner.dart';
++import 'ui/app_startup.dart';
+ import 'utils/ble_manager.dart';
+ import 'utils/healthy_store_sync_manager.dart';
+ 
+-void main() async {
++void main() {
+   WidgetsFlutterBinding.ensureInitialized();
++  runApp(AppStartup(initialize: _initialize, app: const HealthyPiApp()));
++}
+ 
++Future<void> _initialize() async {
+   // Sets the universal_ble log level; without this the plugin stays at its
+   // verbose default and floods release logs.
+   await BleManager.instance.init();
+@@ -23,8 +27,6 @@
+   // Drop any leftover synthetic-QA opt-in and rebuild trends from real samples
+   // only — fabricated firmware test data must never stay on charts after QA.
+   await HealthyStoreSyncManager.instance.ensureRealDataOnly();
+-
+-  runApp(const HealthyPiApp());
+ }
+ 
+ /// The oldest app build that can talk to a Move at all.
+@@ -69,8 +71,9 @@
+       themeMode: ThemeMode.dark,
+       // Wraps every route (pushed screens and dialogs included), so no chart can
+       // render fabricated samples without the app saying so on screen.
+-      builder: (context, child) =>
+-          HpiSyntheticBanner(child: child ?? const SizedBox.shrink()),
++      builder:
++          (context, child) =>
++              HpiSyntheticBanner(child: child ?? const SizedBox.shrink()),
+       // Named routes for major screens
+       initialRoute: '/',
+       routes: {
+@@ -86,7 +89,8 @@
+         // have a Later button; this relaxes that to "dismissable unless the
+         // update is mandatory", which is the only case that must not be
+         // bypassed by a back gesture.
+-        '/': (context) => UpgradeAlert(
++        '/':
++            (context) => UpgradeAlert(
+               upgrader: _upgrader,
+               shouldPopScope: () => !_upgrader.blocked(),
+               child: const ScrMainShell(),
+@@ -97,10 +101,8 @@
+       },
+       // Fallback for an unregistered route name — always the redesigned shell.
+       onUnknownRoute: (settings) {
+-        return MaterialPageRoute(
+-          builder: (context) => const ScrMainShell(),
+-        );
++        return MaterialPageRoute(builder: (context) => const ScrMainShell());
+       },
+     );
+   }
+-}
+\ No newline at end of file
 +}
 --- /dev/null
 +++ b/lib/models/live_signal.dart
@@ -1340,6 +1464,94 @@
        const ScrDeviceNew(),
      ];
      return HpiAdaptiveScaffold(
+--- /dev/null
++++ b/lib/ui/app_startup.dart
+@@ -0,0 +1,85 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++
++import '../theme/hpi_theme.dart';
++
++/// Paints before native initialization and keeps failures visible and retryable.
++/// The main screens are only mounted after local data preparation succeeds.
++class AppStartup extends StatefulWidget {
++  const AppStartup({super.key, required this.initialize, required this.app});
++  final Future<void> Function() initialize;
++  final Widget app;
++
++  @override
++  State<AppStartup> createState() => _AppStartupState();
++}
++
++class _AppStartupState extends State<AppStartup> {
++  late Future<void> _initialization;
++
++  @override
++  void initState() {
++    super.initState();
++    _initialization = Future<void>.sync(widget.initialize);
++  }
++
++  void _retry() {
++    final initialization = Future<void>.sync(widget.initialize);
++    setState(() {
++      _initialization = initialization;
++    });
++  }
++
++  @override
++  Widget build(BuildContext context) => FutureBuilder<void>(
++    future: _initialization,
++    builder: (context, snapshot) {
++      if (snapshot.connectionState == ConnectionState.done &&
++          !snapshot.hasError) {
++        return widget.app;
++      }
++      return MaterialApp(
++        debugShowCheckedModeBanner: false,
++        theme: HpiTheme.dark(),
++        home: Scaffold(
++          body: SafeArea(
++            child: Center(
++              child: Padding(
++                padding: const EdgeInsets.all(24),
++                child: SingleChildScrollView(
++                  child: Column(
++                    mainAxisSize: MainAxisSize.min,
++                    children: [
++                      if (!snapshot.hasError) ...[
++                        const CircularProgressIndicator(),
++                        const SizedBox(height: 20),
++                        const Text('Opening HealthyPi Move…'),
++                        const SizedBox(height: 8),
++                        const Text('Preparing Bluetooth and local data.'),
++                      ] else ...[
++                        const Icon(Icons.error_outline, size: 40),
++                        const SizedBox(height: 16),
++                        const Text('Could not open HealthyPi Move'),
++                        const SizedBox(height: 12),
++                        SelectableText(
++                          '${snapshot.error}',
++                          textAlign: TextAlign.center,
++                        ),
++                        const SizedBox(height: 20),
++                        FilledButton(
++                          onPressed: _retry,
++                          child: const Text('Retry'),
++                        ),
++                      ],
++                    ],
++                  ),
++                ),
++              ),
++            ),
++          ),
++        ),
++      );
++    },
++  );
++}
 --- a/lib/ui/charts/hpi_sweep_waveform.dart
 +++ b/lib/ui/charts/hpi_sweep_waveform.dart
 @@ -3,6 +3,7 @@
@@ -2066,10 +2278,83 @@
  description: "HealthyPi Move"
  publish_to: 'none'
 -version: 3.0.8+96
-+version: 3.0.10+98
++version: 3.0.11+99
  
  environment:
    sdk: ^3.7.0
+--- /dev/null
++++ b/test/app_startup_test.dart
+@@ -0,0 +1,70 @@
++import 'dart:async';
++
++import 'package:flutter/material.dart';
++import 'package:flutter/services.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:move/ui/app_startup.dart';
++
++void main() {
++  testWidgets(
++    'pending initialization paints progress and waits before opening the app',
++    (tester) async {
++      final initialized = Completer<void>();
++      await tester.pumpWidget(
++        AppStartup(
++          initialize: () => initialized.future,
++          app: const MaterialApp(home: Text('App ready')),
++        ),
++      );
++      expect(find.text('Opening HealthyPi Move…'), findsOneWidget);
++      expect(find.text('App ready'), findsNothing);
++      initialized.complete();
++      await tester.pumpAndSettle();
++      expect(find.text('App ready'), findsOneWidget);
++    },
++  );
++
++  testWidgets('missing native plugin becomes a visible retryable error', (
++    tester,
++  ) async {
++    int attempts = 0;
++    await tester.pumpWidget(
++      AppStartup(
++        initialize: () async {
++          if (++attempts == 1) {
++            throw MissingPluginException('Bluetooth plugin is missing');
++          }
++        },
++        app: const MaterialApp(home: Text('App ready')),
++      ),
++    );
++    await tester.pumpAndSettle();
++    expect(find.text('Could not open HealthyPi Move'), findsOneWidget);
++    expect(find.textContaining('Bluetooth plugin is missing'), findsOneWidget);
++    expect(find.text('App ready'), findsNothing);
++    expect(tester.takeException(), isNull);
++    await tester.tap(find.text('Retry'));
++    await tester.pumpAndSettle();
++    expect(find.text('App ready'), findsOneWidget);
++    expect(attempts, 2);
++  });
++
++  testWidgets('storage initialization errors do not mount the data screens', (
++    tester,
++  ) async {
++    await tester.pumpWidget(
++      AppStartup(
++        initialize:
++            () async => throw StateError('Could not open local database'),
++        app: const MaterialApp(home: Text('App ready')),
++      ),
++    );
++    await tester.pumpAndSettle();
++    expect(
++      find.textContaining('Could not open local database'),
++      findsOneWidget,
++    );
++    expect(find.text('App ready'), findsNothing);
++    expect(tester.takeException(), isNull);
++  });
++}
 --- /dev/null
 +++ b/test/continuous_screen_test.dart
 @@ -0,0 +1,68 @@

@@ -10,12 +10,16 @@ import 'screens/scr_bpt_calibration.dart';
 import 'screens/scr_blood_pressure.dart';
 import 'theme/hpi_theme.dart';
 import 'ui/components/hpi_synthetic_banner.dart';
+import 'ui/app_startup.dart';
 import 'utils/ble_manager.dart';
 import 'utils/healthy_store_sync_manager.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  runApp(AppStartup(initialize: _initialize, app: const HealthyPiApp()));
+}
 
+Future<void> _initialize() async {
   // Sets the universal_ble log level; without this the plugin stays at its
   // verbose default and floods release logs.
   await BleManager.instance.init();
@@ -23,8 +27,6 @@ void main() async {
   // Drop any leftover synthetic-QA opt-in and rebuild trends from real samples
   // only — fabricated firmware test data must never stay on charts after QA.
   await HealthyStoreSyncManager.instance.ensureRealDataOnly();
-
-  runApp(const HealthyPiApp());
 }
 
 /// The oldest app build that can talk to a Move at all.
@@ -69,8 +71,9 @@ class HealthyPiApp extends StatelessWidget {
       themeMode: ThemeMode.dark,
       // Wraps every route (pushed screens and dialogs included), so no chart can
       // render fabricated samples without the app saying so on screen.
-      builder: (context, child) =>
-          HpiSyntheticBanner(child: child ?? const SizedBox.shrink()),
+      builder:
+          (context, child) =>
+              HpiSyntheticBanner(child: child ?? const SizedBox.shrink()),
       // Named routes for major screens
       initialRoute: '/',
       routes: {
@@ -86,7 +89,8 @@ class HealthyPiApp extends StatelessWidget {
         // have a Later button; this relaxes that to "dismissable unless the
         // update is mandatory", which is the only case that must not be
         // bypassed by a back gesture.
-        '/': (context) => UpgradeAlert(
+        '/':
+            (context) => UpgradeAlert(
               upgrader: _upgrader,
               shouldPopScope: () => !_upgrader.blocked(),
               child: const ScrMainShell(),
@@ -97,9 +101,7 @@ class HealthyPiApp extends StatelessWidget {
       },
       // Fallback for an unregistered route name — always the redesigned shell.
       onUnknownRoute: (settings) {
-        return MaterialPageRoute(
-          builder: (context) => const ScrMainShell(),
-        );
+        return MaterialPageRoute(builder: (context) => const ScrMainShell());
       },
     );
   }

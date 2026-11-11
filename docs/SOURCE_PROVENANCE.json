@@ -3,23 +3,27 @@
     "app": {
       "upstream": "https://github.com/Protocentral/healthypi_move_flutter.git",
       "base_commit": "c58ff7a1f9a2fdd1d69be83f07bbf2fc079f90d5",
-      "files": 260,
+      "files": 263,
       "changed_files": [
         "analysis_options.yaml",
         "android/app/build.gradle.kts",
         "android/app/src/main/AndroidManifest.xml",
         "docs/CONTINUOUS_LIVE.md",
         "docs/RESEARCH_PPG_LIVE.md",
+        "docs/STARTUP_FIX.md",
         "lib/ble/research_packet.dart",
+        "lib/main.dart",
         "lib/models/live_signal.dart",
         "lib/screens/scr_live.dart",
         "lib/screens/scr_main_shell.dart",
+        "lib/ui/app_startup.dart",
         "lib/ui/charts/hpi_sweep_waveform.dart",
         "lib/utils/connection_manager.dart",
         "lib/utils/live_stream_controller.dart",
         "lib/utils/research_session_controller.dart",
         "pubspec.lock",
         "pubspec.yaml",
+        "test/app_startup_test.dart",
         "test/continuous_screen_test.dart",
         "test/live_screen_test.dart",
         "test/live_stream_controller_test.dart",
@@ -150,10 +154,10 @@
     },
     {
       "path": "app/android/app/build.gradle.kts",
-      "sha256": "7045534450c76bec3a5ce8bbf0fd57a6b98ce8d50f7b79a49afe8bc33bb35eff",
-      "bytes": 3423,
-      "workspace_sha256": "4264ea164513adb8591f143936573f404be9dd5f0fc0faee631564c8f66d861d",
-      "workspace_bytes": 3511
+      "sha256": "14a91cdd98b7906d12f3ab578d85023720ae6bf294fb941adfadd4223f589c92",
+      "bytes": 4545,
+      "workspace_sha256": "fc68fd60c199f858bd8764f585aed8687597ba9f67f4c7c7d30ecc6abae30a87",
+      "workspace_bytes": 4657
     },
     {
       "path": "app/android/app/proguard-rules.pro",
@@ -441,6 +445,13 @@
       "bytes": 3367,
       "workspace_sha256": "c7795c1a1f143598dcfcc51f37f9e8b98b115570c97d481081d4b318509afcae",
       "workspace_bytes": 3367
+    },
+    {
+      "path": "app/docs/STARTUP_FIX.md",
+      "sha256": "56b68e423743ca0b34dff2d584b8cd47eaf5d915009a89a0f199d023f397edc3",
+      "bytes": 1709,
+      "workspace_sha256": "56b68e423743ca0b34dff2d584b8cd47eaf5d915009a89a0f199d023f397edc3",
+      "workspace_bytes": 1709
     },
     {
       "path": "app/docs/images/appstore.png",
@@ -892,10 +903,10 @@
     },
     {
       "path": "app/lib/main.dart",
-      "sha256": "c318cfbbbb9aec498dc2762238729c7659cfb5910c17b1470140f512e315014e",
-      "bytes": 4714,
-      "workspace_sha256": "d8bab3185e46a47b8d972d09a78b3fb944a5ff88cc1b4fdc4b3acbdff56013a5",
-      "workspace_bytes": 4819
+      "sha256": "5f6c10c260ed71a484e384692518d393cfd4aae0691a5a21a469aff94c2872d4",
+      "bytes": 4822,
+      "workspace_sha256": "ea4738cf14c7dd431fb5b678b7380c745956d46bc997019d32105245720cdaea",
+      "workspace_bytes": 4930
     },
     {
       "path": "app/lib/models/device_info.dart",
@@ -1071,6 +1082,13 @@
       "bytes": 1151,
       "workspace_sha256": "6c79a55dd834b03a0e999d6c5f44154a4e6bf54e1750cf09e0c9136d2175d8f5",
       "workspace_bytes": 1183
+    },
+    {
+      "path": "app/lib/ui/app_startup.dart",
+      "sha256": "786419b0570e4f788e7ea76dd9070f7c2328770cd7def5d23a274bc3c5269a87",
+      "bytes": 2745,
+      "workspace_sha256": "786419b0570e4f788e7ea76dd9070f7c2328770cd7def5d23a274bc3c5269a87",
+      "workspace_bytes": 2745
     },
     {
       "path": "app/lib/ui/charts/hpi_ring_gauge.dart",
@@ -1564,10 +1582,17 @@
     },
     {
       "path": "app/pubspec.yaml",
-      "sha256": "e3e5a623056156216535efef8591a523e4c8bb2a24a387cc7f42d985b540c359",
+      "sha256": "0f51e533f3de4c97133a0dc372ca3ea1bc9e47ab9546943a180fdcfb2be5ed59",
       "bytes": 3064,
-      "workspace_sha256": "e3e5a623056156216535efef8591a523e4c8bb2a24a387cc7f42d985b540c359",
+      "workspace_sha256": "0f51e533f3de4c97133a0dc372ca3ea1bc9e47ab9546943a180fdcfb2be5ed59",
       "workspace_bytes": 3064
+    },
+    {
+      "path": "app/test/app_startup_test.dart",
+      "sha256": "a9fb44723ff2dde3966fa3cf68fac21157c9a4e6621a31504f7368257ba88563",
+      "bytes": 2198,
+      "workspace_sha256": "a9fb44723ff2dde3966fa3cf68fac21157c9a4e6621a31504f7368257ba88563",
+      "workspace_bytes": 2198
     },
     {
       "path": "app/test/auto_sync_policy_test.dart",
