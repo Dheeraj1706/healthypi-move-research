@@ -4,10 +4,10 @@
  VERSION_MAJOR = 3
  VERSION_MINOR = 1
 -PATCHLEVEL = 0
-+PATCHLEVEL = 2
++PATCHLEVEL = 3
  VERSION_TWEAK = 0
 -EXTRAVERSION =
-+EXTRAVERSION = continuous
++EXTRAVERSION = fingerfix
 --- a/app/src/ble_module.c
 +++ b/app/src/ble_module.c
 @@ -1,3 +1,4 @@
@@ -132,6 +132,41 @@
      uint32_t raw_red[BPT_PPG_POINTS_PER_SAMPLE];
      uint32_t raw_ir[BPT_PPG_POINTS_PER_SAMPLE];
  
+--- /dev/null
++++ b/app/src/hpi_finger_contact.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef HPI_FINGER_CONTACT_H
++#define HPI_FINGER_CONTACT_H
++#include <stdbool.h>
++#include <stdint.h>
++
++struct hpi_finger_contact_debounce {
++    int64_t bad_since_ms;
++    bool bad_pending;
++};
++
++/* Caller serializes this state and its contact flag. Empty frames are neither
++ * contact nor loss evidence. Preserve the existing status mapping and immediate
++ * contact-on behavior; require a full second before contact-off. */
++static inline bool hpi_finger_contact_update(struct hpi_finger_contact_debounce *d,
++                                            bool previous, bool fresh,
++                                            bool candidate, int64_t now_ms)
++{
++    if (!fresh) { return previous; }
++    if (candidate) {
++        d->bad_pending = false;
++        return true;
++    }
++    if (!previous) { d->bad_pending = false; return false; }
++    if (!d->bad_pending || now_ms < d->bad_since_ms) {
++        d->bad_since_ms = now_ms;
++        d->bad_pending = true;
++        return true;
++    }
++    return now_ms - d->bad_since_ms < 1000;
++}
++#endif
 --- /dev/null
 +++ b/app/src/hpi_research.c
 @@ -0,0 +1,315 @@
@@ -770,12 +805,96 @@
              LOG_ERR("SMF Run error: %d", ret);
 --- a/app/src/sm/smf_ppg_finger.c
 +++ b/app/src/sm/smf_ppg_finger.c
-@@ -1,3 +1,4 @@
+@@ -1,3 +1,5 @@
 +#include "hpi_research.h"
++#include "hpi_finger_contact.h"
  /*
   * HealthyPi Move
   * 
-@@ -378,7 +379,7 @@
+@@ -159,9 +161,19 @@
+ 
+ static int64_t wait_start_ts;
+ static atomic_t finger_contact_ok = ATOMIC_INIT(0); /* decode(workqueue) writes, SMF reads/resets */  
+-static bool prev_finger_contact_ok = false;
+ static int64_t contact_lost_start_ts = 0;
+-static uint8_t contact_debounce_ts = 0;
++static struct hpi_finger_contact_debounce finger_contact_debounce;
++static struct k_spinlock finger_contact_lock;
++
++static void reset_finger_contact(void)
++{
++    k_spinlock_key_t key = k_spin_lock(&finger_contact_lock);
++    atomic_set(&finger_contact_ok, 0);
++    finger_contact_debounce = (struct hpi_finger_contact_debounce){0};
++    k_spin_unlock(&finger_contact_lock, key);
++    k_sem_reset(&sem_finger_contact_on);
++    k_sem_reset(&sem_finger_contact_off);
++}
+ 
+ void hpi_bpt_set_cal_vals(uint8_t cal_index, uint8_t cal_sys, uint8_t cal_dia)
+ {
+@@ -298,7 +310,11 @@
+ 
+ static void sensor_ppg_finger_decode(uint8_t *buf, uint32_t buf_len, uint8_t m_ppg_op_mode)
+ {
++    if (!buf || buf_len < sizeof(struct max32664d_encoded_data) ||
++        m_ppg_op_mode == PPG_FI_OP_MODE_IDLE) { return; }
+     const struct max32664d_encoded_data *edata = (const struct max32664d_encoded_data *)buf;
++    /* No-data RTIO reads have no fresh algorithm status to interpret. */
++    if (edata->num_samples == 0 || edata->num_samples > 32) { return; }
+     struct hpi_ppg_fi_data_t ppg_sensor_sample;
+ 
+     uint8_t finger_status = edata->bpt_status ;
+@@ -311,39 +327,15 @@
+    
+     bool current_contact = (finger_status == 4 || finger_status == 1 || finger_status == 2);
+ 
+-   if (current_contact) {
+-    contact_debounce_ts= 0;
+-    
+-    // Only set to true if it was false before
+-    if (!atomic_get(&finger_contact_ok)) {
+-        atomic_set(&finger_contact_ok, 1);
+-        LOG_INF("Finger Contact status: %d", finger_status);
+-        
+-        // Signal that contact was just detected
+-        if (!prev_finger_contact_ok) {
+-            k_sem_give(&sem_finger_contact_on);
+-            wait_start_ts = 0;  // Reset wait timer
+-        }
+-     }
+-    } else {
+-        if(contact_debounce_ts == 0)
+-            contact_debounce_ts = k_uptime_get();
+-        else if (k_uptime_get() - contact_debounce_ts >= 1000) {  // Require 1000ms(1 sec) of bad readings
+-            // Only set to false if it was true before
+-            if (atomic_get(&finger_contact_ok)) {
+-                atomic_set(&finger_contact_ok, 0);
+-                //LOG_INF("Finger contact lost (confirmed after %d ms)", k_uptime_get() - contact_debounce_ts);
+-                
+-                // Signal that contact was just lost
+-                if (prev_finger_contact_ok) {
+-                    k_sem_give(&sem_finger_contact_off);
+-                }
+-            }
+-        }
+-    }
+-
+-    // Update previous state
+-    prev_finger_contact_ok = atomic_get(&finger_contact_ok);
++    k_spinlock_key_t key = k_spin_lock(&finger_contact_lock);
++    bool previous = atomic_get(&finger_contact_ok) != 0;
++    bool contact = hpi_finger_contact_update(&finger_contact_debounce,
++        previous, true, current_contact, k_uptime_get());
++    atomic_set(&finger_contact_ok, contact);
++    k_spin_unlock(&finger_contact_lock, key);
++    if (contact != previous) {
++        k_sem_give(contact ? &sem_finger_contact_on : &sem_finger_contact_off);
++    }
+ 
+     uint16_t _n_samples = edata->num_samples;
+     // Cap to the FI PPG points per sample (driver may return up to 32)
+@@ -378,7 +370,7 @@
              {
                  ppg_sensor_sample.spo2_state = SPO2_MEAS_COMPUTATION;
              }
@@ -784,7 +903,7 @@
              {
                  ppg_sensor_sample.spo2_state = SPO2_MEAS_SUCCESS;
                  LOG_INF("SpO2 Measurement Done");
-@@ -398,6 +399,7 @@
+@@ -398,6 +390,7 @@
              }
          }
  
@@ -792,7 +911,7 @@
          if (k_msgq_put(&q_ppg_fi_sample, &ppg_sensor_sample, K_MSEC(1)) != 0)
          {
              static uint32_t fi_drops = 0;
-@@ -670,6 +672,8 @@
+@@ -670,6 +663,8 @@
  
  static void st_ppg_fing_idle_entry(void *o)
  {
@@ -801,7 +920,18 @@
      LOG_DBG("PPG Finger SM Idle Entry");
      k_sem_give(&sem_stop_fi_sampling);
      atomic_set(&bpt_process_done, 0);
-@@ -713,6 +717,7 @@
+@@ -681,9 +676,8 @@
+     k_event_clear(&fi_evt, EVT_FI_SPO2_CANCEL);
+     k_event_clear(&fi_evt, EVT_FI_BPT_EST_CANCEL);
+     k_event_clear(&fi_evt, EVT_FI_BPT_CAL_CANCEL);
+-    atomic_set(&finger_contact_ok, 0); 
++    reset_finger_contact();
+     contact_lost_start_ts = 0;
+-    contact_debounce_ts = 0;
+ }
+ 
+ // Add a new function to check if calibration data exists
+@@ -713,6 +707,7 @@
  
      if (hpi_evt_consume(&fi_evt, EVT_BPT_EST_START))
      {
@@ -809,7 +939,7 @@
          // Check if calibration data is available before proceeding
          if (hpi_bpt_cal_data_available())
          {
-@@ -731,6 +736,7 @@
+@@ -731,6 +726,7 @@
  
      if (hpi_evt_consume(&fi_evt, EVT_BPT_ENTER_CAL))
      {
@@ -817,7 +947,7 @@
          LOG_INF("sem_bpt_enter_mode_cal received - entering BPT calibration mode");
          s->ppg_fi_op_mode = PPG_FI_OP_MODE_BPT_CAL;
          // Route through CHECK_SENSOR to ensure sensor is connected before showing wait screen
-@@ -747,6 +753,7 @@
+@@ -747,6 +743,7 @@
       * EVT_BPT_ENTER_CAL (UI may skip the intermediate mode). Route CHECK_SENSOR first. */
      if (hpi_evt_consume(&fi_evt, EVT_BPT_CAL_START))
      {
@@ -825,7 +955,7 @@
          LOG_INF("BPT calibration start from IDLE - checking sensor first");
          s->ppg_fi_op_mode = PPG_FI_OP_MODE_BPT_CAL;
          // Store that we have cal values ready and should proceed to calibration after sensor check
-@@ -790,6 +797,7 @@
+@@ -790,6 +787,7 @@
     // LOG_DBG("PPG Finger SM BPT Calibration Running");
      if (hpi_evt_consume(&fi_evt, EVT_BPT_CAL_START))
      {
@@ -833,7 +963,7 @@
          LOG_INF("sem_bpt_cal_start received in CAL_WAIT state - starting calibration");
          // Turn off timeout
         // k_timer_stop(&tmr_bpt_cal_timeout);
-@@ -903,7 +911,7 @@
+@@ -903,7 +901,7 @@
       * sensor, raw IR PPG streaming). Bracket it here and in the state exit — the
       * exit fires on every leave path (done / contact-timeout / cancel via
       * hpi_bpt_abort()->smf_set_state(IDLE)), so the record always finalizes. */
@@ -842,7 +972,7 @@
      // hpi_load_scr_spl(SCR_SPL_BPT_MEASURE, SCROLL_NONE, SCR_SPL_FI_SENS_CHECK, 0, 0, 0);
      // hpi_hw_fi_sensor_on();
      // hw_bpt_start_est();
-@@ -1047,13 +1055,15 @@
+@@ -1047,13 +1045,15 @@
  
  static void st_ppg_fi_check_sensor_entry(void *o)
  {
@@ -859,7 +989,7 @@
      }
      else
      {
-@@ -1136,7 +1146,7 @@
+@@ -1136,7 +1136,7 @@
      }
      else if (s->ppg_fi_op_mode == PPG_FI_OP_MODE_SPO2_EST)
      {
@@ -868,7 +998,7 @@
         smf_set_state(SMF_CTX(&sf_obj), &ppg_fi_states[PPG_FI_STATE_WAIT_FOR_CONTACT]);
      }
      else
-@@ -1150,6 +1160,7 @@
+@@ -1150,6 +1150,7 @@
  
  static void st_ppg_fi_sensor_fail_entry(void *o)
  {
@@ -876,7 +1006,7 @@
      LOG_DBG("PPG Finger SM Sensor Fail Entry");
      hpi_hw_fi_sensor_off();
      // Show error screen
-@@ -1165,6 +1176,7 @@
+@@ -1165,6 +1166,7 @@
  
  static void st_ppg_fi_spo2_est_entry(void *o)
  {
@@ -884,7 +1014,7 @@
      LOG_DBG("PPG Finger SM SpO2 Estimation Entry");
      sens_decode_ppg_fi_op_mode = PPG_FI_OP_MODE_SPO2_EST;
      atomic_set(&spo2_process_done, 0);  // Reset completion flag for new measurement
-@@ -1181,7 +1193,11 @@
+@@ -1181,7 +1183,11 @@
  static enum smf_state_result st_ppg_fi_spo2_est_run(void *o)
  {
      LOG_DBG("PPG Finger SM SpO2 Estimation Running");
@@ -897,7 +1027,7 @@
      {
          if (contact_lost_start_ts == 0)
          {
-@@ -1202,7 +1218,7 @@
+@@ -1202,7 +1208,7 @@
              contact_lost_start_ts = 0;
      }
      /* Check for completion */
@@ -906,7 +1036,7 @@
      {
          k_sem_give(&sem_stop_fi_sampling); // Stop the sampling
          k_sleep(K_MSEC(1000));             // Wait for the sampling to stop
-@@ -1229,6 +1245,7 @@
+@@ -1229,6 +1235,7 @@
  
  static void st_ppg_fi_spo2_est_done_entry(void *o)
  {
@@ -914,7 +1044,7 @@
      LOG_DBG("PPG Finger SM SpO2 Estimation Done Entry");
      hpi_load_scr_spl(SCR_SPL_SPO2_RESULT, SCROLL_NONE, SCR_SPO2, HPI_SPO2_RESULT_SUCCESS, m_est_spo2, 0);
      hpi_hw_fi_sensor_off();
-@@ -1244,6 +1261,7 @@
+@@ -1244,11 +1251,11 @@
  
  static void st_ppg_fi_wait_for_contact_entry(void *o)
  {
@@ -922,7 +1052,13 @@
      struct s_ppg_fi_object *s = (struct s_ppg_fi_object *)o;
      LOG_DBG("PPG Finger SM Wait for Contact Entry");
      wait_start_ts = k_uptime_get();
-@@ -1291,7 +1309,7 @@
+-    atomic_set(&finger_contact_ok, 0);
+-    contact_debounce_ts = 0;
++    reset_finger_contact();
+     hpi_hw_fi_sensor_on();
+     sens_decode_ppg_fi_op_mode = s->ppg_fi_op_mode;
+     /* Loads BPT cal + starts estimation (also arms contact detection for SpO2).
+@@ -1291,7 +1298,7 @@
          return SMF_EVENT_HANDLED;
      }
   
@@ -931,7 +1067,7 @@
              LOG_INF("FINGER CONTACT TIMEOUT");
              hpi_bpt_abort();
              k_event_post(&fi_evt, EVT_FI_CONTACT_TIMEOUT);
-@@ -1406,4 +1424,4 @@
+@@ -1406,4 +1413,4 @@
  #define PPG_FI_CTRL_THREAD_PRIORITY 7
  
  K_THREAD_DEFINE(ppg_finger_smf_thread, SMF_PPG_FINGER_THREAD_STACKSIZE, smf_ppg_finger_thread, NULL, NULL, NULL, SMF_PPG_FINGER_THREAD_PRIORITY, 0, 500);
@@ -1357,6 +1493,44 @@
 +duration, per-channel sample counts/gaps, boot changes, battery/temperature and
 +any resets. Host tests and a compiled ZIP do not establish 3–5 hour reliability.
 --- /dev/null
++++ b/docs/FINGER_CONTACT_FIX.md
+@@ -0,0 +1,35 @@
++# Finger contact fix — 3.1.3-fingerfix
++
++This OTA replaces 3.1.2-continuous while keeping its research BLE commands,
++concurrent controls and waveform layout compatible with Android app 3.0.11.
++No Android update is needed for this fix.
++
++The finger contact-loss debounce previously assigned 64-bit millisecond uptime
++to an 8-bit variable. At 60000 ms it stored 96, so a check only 20 ms later
++mistakenly calculated 59924 ms elapsed and declared loss before the intended
++1000 ms delay. This could amplify brief algorithm-status dips into rapid changes
++between streaming and waiting for contact.
++
++The fix uses a 64-bit timestamp and an explicit pending-loss flag, including at
++uptime zero. A recovered accepted status clears the pending loss. Contact state
++and the debounce state are serialized during updates/reset. The existing
++algorithm-status mapping (1/2/4 accepted) and immediate contact-on behavior are
++preserved; this change does not claim algorithm status is a direct measurement
++of physical attachment.
++
++Finger decode now checks buffer size and a nonzero valid sample count before
++reading contact/status fields. The MAX32664D RTIO driver initializes each encoded
++frame and returns an error for an unsupported mode. An empty FIFO/read therefore
++cannot reuse an uninitialized status byte to toggle contact.
++
++The shared header's host C regression test covers the 60000 ms truncation case,
++the 999/1000 ms loss boundary, recovery between short dips, empty frames, uptime
++zero and uptime beyond 32-bit millisecond wrap. Protocol/encoder/admission tests
++are also retained. The Nordic target build and signed OTA package are checked
++separately; these host checks are not a physical watch/contact test.
++
++On the watch, maintain contact and verify short status dips no longer immediately
++switch the label. Removing contact must still reach waiting after sustained
++rejected statuses, and restoring accepted statuses must recover. Continued
++waiting can still mean weak signal, an algorithm state or a genuine contact
++issue. Compare raw samples and actual status values before diagnosing hardware.
+--- /dev/null
 +++ b/docs/RESEARCH_PPG.md
 @@ -0,0 +1,70 @@
 +# Additional live PPG channels
@@ -1567,6 +1741,42 @@
              }
              else if (btag == 0x06) /* FIFO empty */
              {
+--- a/drivers/sensor/max32664d/max32664d_async.c
++++ b/drivers/sensor/max32664d/max32664d_async.c
+@@ -4,6 +4,7 @@
+ 
+ #include "max32664d.h"
+ #include <errno.h>
++#include <string.h>
+ 
+ /* Local I2C wrappers to centralize bus calls (keeps parity with max32664c pattern).
+  * These are simple wrappers that call the DeviceTree helpers; they can be extended
+@@ -168,6 +169,9 @@
+         return;
+     }
+ 
++    /* The caller may reuse an uninitialized stack buffer. A no-data read must
++     * not expose old algorithm/contact fields from an earlier frame. */
++    memset(buf, 0, min_buf_len);
+     if ((data->op_mode == MAX32664D_OP_MODE_BPT_EST) || (data->op_mode == MAX32664D_OP_MODE_RAW) || (data->op_mode == MAX32664D_OP_MODE_BPT_CAL_START))
+     {
+         edata = (struct max32664d_encoded_data *)buf;
+@@ -178,7 +182,7 @@
+     else
+     {
+         LOG_ERR("Invalid operation mode\n");
+-        // return 4;
++        rc = -ENOTSUP;
+     }
+ 
+     if (rc != 0)
+@@ -226,4 +230,4 @@
+     data->op_mode = MAX32664D_OP_MODE_IDLE;
+ 
+     return 0;
+-}
+\ No newline at end of file
++}
 --- /dev/null
 +++ b/tests/research_protocol/control_test.c
 @@ -0,0 +1,20 @@
@@ -1588,6 +1798,48 @@
 +    assert(hpr_start_busy(true, false, 3, 3, 7, false));
 +    /* Stopping one target leaves the remaining continuous targets admissible. */
 +    assert(!hpr_start_busy(true, false, 14, 14, 14, true));
++    return 0;
++}
+--- /dev/null
++++ b/tests/research_protocol/finger_contact_test.c
+@@ -0,0 +1,39 @@
++#include <assert.h>
++#include <stdio.h>
++#include "hpi_finger_contact.h"
++
++int main(void)
++{
++    struct hpi_finger_contact_debounce d = {0};
++    bool contact = hpi_finger_contact_update(&d, false, true, true, 59980);
++    assert(contact);
++    /* Regression: old uint8 timestamp stored 60000 as 96 and lost contact
++     * after only 20 ms. Check the complete delay at realistic watch uptime. */
++    assert(hpi_finger_contact_update(&d, contact, true, false, 60000));
++    assert(d.bad_since_ms == 60000);
++    assert(hpi_finger_contact_update(&d, contact, true, false, 60020));
++    assert(hpi_finger_contact_update(&d, contact, true, false, 60999));
++    assert(!hpi_finger_contact_update(&d, contact, true, false, 61000));
++    /* A recovered signal clears the pending loss instead of carrying it over. */
++    assert(hpi_finger_contact_update(&d, false, true, true, 61020));
++    assert(!d.bad_pending);
++    assert(hpi_finger_contact_update(&d, true, true, false, 62000));
++    assert(hpi_finger_contact_update(&d, true, true, true, 62020));
++    assert(hpi_finger_contact_update(&d, true, true, false, 63000));
++    assert(hpi_finger_contact_update(&d, true, true, false, 63020));
++    /* Missing data cannot toggle contact on or off or start a loss timer. */
++    d = (struct hpi_finger_contact_debounce){0};
++    assert(hpi_finger_contact_update(&d, true, false, false, 70000));
++    assert(!d.bad_pending);
++    assert(!hpi_finger_contact_update(&d, false, false, true, 70020));
++    /* No zero-timestamp sentinel; also safe beyond 32-bit millisecond wrap. */
++    assert(hpi_finger_contact_update(&d, true, true, false, 0));
++    assert(!hpi_finger_contact_update(&d, true, true, false, 1000));
++    d = (struct hpi_finger_contact_debounce){0};
++    const int64_t long_uptime = INT64_C(4294967296) + 60000;
++    assert(hpi_finger_contact_update(&d, true, true, false, long_uptime));
++    assert(hpi_finger_contact_update(&d, true, true, false, long_uptime + 999));
++    assert(!hpi_finger_contact_update(&d, true, true, false, long_uptime + 1000));
++    puts("PASS: finger contact delay, recovery, empty frames, uptime zero and long uptime");
 +    return 0;
 +}
 --- /dev/null

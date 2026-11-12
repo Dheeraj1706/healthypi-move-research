@@ -34,12 +34,13 @@
     "fw": {
       "upstream": "https://github.com/Protocentral/healthypi-move-fw.git",
       "base_commit": "874f1347a6ec649cd9eef8bafb9d396d5806ca1e",
-      "files": 305,
+      "files": 308,
       "changed_files": [
         "app/VERSION",
         "app/src/ble_module.c",
         "app/src/data_module.c",
         "app/src/hpi_common_types.h",
+        "app/src/hpi_finger_contact.h",
         "app/src/hpi_research.c",
         "app/src/hpi_research.h",
         "app/src/hpi_research_policy.h",
@@ -53,10 +54,13 @@
         "app/src/ui/screens/scr_spo2_monitor.c",
         "app/src/ui/screens/scr_spo2_result.c",
         "docs/CONTINUOUS_RESEARCH.md",
+        "docs/FINGER_CONTACT_FIX.md",
         "docs/RESEARCH_PPG.md",
         "drivers/sensor/max30001/max30001.c",
         "drivers/sensor/max30001/max30001_async.c",
+        "drivers/sensor/max32664d/max32664d_async.c",
         "tests/research_protocol/control_test.c",
+        "tests/research_protocol/finger_contact_test.c",
         "tests/research_protocol/test_protocol.py",
         "tests/research_protocol/wire_test.c",
         "tools/build_research.py",
@@ -2114,10 +2118,10 @@
     },
     {
       "path": "fw/app/VERSION",
-      "sha256": "8667a7db1488324aad5144b17d8d4c1fbaa280d69a4415e037d409901945d352",
-      "bytes": 95,
-      "workspace_sha256": "8667a7db1488324aad5144b17d8d4c1fbaa280d69a4415e037d409901945d352",
-      "workspace_bytes": 95
+      "sha256": "99d26d581622ca2c2f850ce0535885f21321ea461931e421ab6b7a98fdfbbf80",
+      "bytes": 94,
+      "workspace_sha256": "99d26d581622ca2c2f850ce0535885f21321ea461931e421ab6b7a98fdfbbf80",
+      "workspace_bytes": 94
     },
     {
       "path": "fw/app/app.overlay",
@@ -2400,6 +2404,13 @@
       "workspace_bytes": 4101
     },
     {
+      "path": "fw/app/src/hpi_finger_contact.h",
+      "sha256": "e32e9d10b98e36abdc52fbacb0d6e140153a1499930c2cd5ac35658db6cecfda",
+      "bytes": 1064,
+      "workspace_sha256": "e32e9d10b98e36abdc52fbacb0d6e140153a1499930c2cd5ac35658db6cecfda",
+      "workspace_bytes": 1064
+    },
+    {
       "path": "fw/app/src/hpi_research.c",
       "sha256": "3a692720a4661ba562628f92ca3c5c0d3a9ec2672d0cf82ecc4e68d58a71fd1e",
       "bytes": 13640,
@@ -2625,10 +2636,10 @@
     },
     {
       "path": "fw/app/src/sm/smf_ppg_finger.c",
-      "sha256": "0ea98a1a73c9a69fa4ceb5e6cebcd603bb9f6d0b1e5369ef516e9ad9688bd531",
-      "bytes": 56083,
-      "workspace_sha256": "0ea98a1a73c9a69fa4ceb5e6cebcd603bb9f6d0b1e5369ef516e9ad9688bd531",
-      "workspace_bytes": 56083
+      "sha256": "18fd9487f9a43c83bc0926a7b96669a042a0943bbd2ed5086b37bfa7af3ab21c",
+      "bytes": 55881,
+      "workspace_sha256": "18fd9487f9a43c83bc0926a7b96669a042a0943bbd2ed5086b37bfa7af3ab21c",
+      "workspace_bytes": 55881
     },
     {
       "path": "fw/app/src/sm/smf_ppg_wrist.c",
@@ -3597,6 +3608,13 @@
       "workspace_bytes": 5151
     },
     {
+      "path": "fw/docs/FINGER_CONTACT_FIX.md",
+      "sha256": "abd093f965416453ebf12a6bbbdab0ea2864b17900f03e0d771a920956519476",
+      "bytes": 2092,
+      "workspace_sha256": "abd093f965416453ebf12a6bbbdab0ea2864b17900f03e0d771a920956519476",
+      "workspace_bytes": 2092
+    },
+    {
       "path": "fw/docs/H6_ADVANCED_METRICS.md",
       "sha256": "1e20d3732b4f68a3439d31ff3f44e6c8ceb084c7ab9cc1f8220f37be62262500",
       "bytes": 5305,
@@ -3906,10 +3924,10 @@
     },
     {
       "path": "fw/drivers/sensor/max32664d/max32664d_async.c",
-      "sha256": "0c877f33a5afed73d70cd11adc3a47a216d5f5f4116239deece1de75ebac376d",
-      "bytes": 8325,
-      "workspace_sha256": "b7714fc54b0a22fcaf8c47743e21ebedaafd49e7e171233f8b5fb23cbe4c8a1f",
-      "workspace_bytes": 8553
+      "sha256": "c13c5e6b6c836347d9cc6e0d690c352f0a61c566b008421bec3271dc1b822e7a",
+      "bytes": 8533,
+      "workspace_sha256": "2098f55236ed8c894aaba9eb8037053a09d6e9c3c608e8c21c6408a2c00491cf",
+      "workspace_bytes": 8766
     },
     {
       "path": "fw/drivers/sensor/max32664d/max32664d_decoder.c",
@@ -4036,6 +4054,13 @@
       "bytes": 899,
       "workspace_sha256": "6a6a8116f47c9a89a880877a432ecd27ab2e844bd7ce3ef5073d44b3de58d210",
       "workspace_bytes": 899
+    },
+    {
+      "path": "fw/tests/research_protocol/finger_contact_test.c",
+      "sha256": "26c74b38e5bdb2fd3cd77f56d79578fbd867e3345423ea46d7d77efe07a98a0a",
+      "bytes": 2137,
+      "workspace_sha256": "26c74b38e5bdb2fd3cd77f56d79578fbd867e3345423ea46d7d77efe07a98a0a",
+      "workspace_bytes": 2137
     },
     {
       "path": "fw/tests/research_protocol/test_protocol.py",

@@ -4,6 +4,7 @@ LOG_MODULE_REGISTER(max32664d_async, CONFIG_SENSOR_LOG_LEVEL);
 
 #include "max32664d.h"
 #include <errno.h>
+#include <string.h>
 
 /* Local I2C wrappers to centralize bus calls (keeps parity with max32664c pattern).
  * These are simple wrappers that call the DeviceTree helpers; they can be extended
@@ -168,6 +169,9 @@ void max32664d_submit(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe
         return;
     }
 
+    /* The caller may reuse an uninitialized stack buffer. A no-data read must
+     * not expose old algorithm/contact fields from an earlier frame. */
+    memset(buf, 0, min_buf_len);
     if ((data->op_mode == MAX32664D_OP_MODE_BPT_EST) || (data->op_mode == MAX32664D_OP_MODE_RAW) || (data->op_mode == MAX32664D_OP_MODE_BPT_CAL_START))
     {
         edata = (struct max32664d_encoded_data *)buf;
@@ -178,7 +182,7 @@ void max32664d_submit(const struct device *dev, struct rtio_iodev_sqe *iodev_sqe
     else
     {
         LOG_ERR("Invalid operation mode\n");
-        // return 4;
+        rc = -ENOTSUP;
     }
 
     if (rc != 0)

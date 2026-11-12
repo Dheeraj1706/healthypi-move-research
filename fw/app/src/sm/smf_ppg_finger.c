@@ -1,4 +1,5 @@
 #include "hpi_research.h"
+#include "hpi_finger_contact.h"
 /*
  * HealthyPi Move
  * 
@@ -160,9 +161,19 @@ static int64_t smf_ppg_fi_spo2_last_measured_time;
 
 static int64_t wait_start_ts;
 static atomic_t finger_contact_ok = ATOMIC_INIT(0); /* decode(workqueue) writes, SMF reads/resets */  
-static bool prev_finger_contact_ok = false;
 static int64_t contact_lost_start_ts = 0;
-static uint8_t contact_debounce_ts = 0;
+static struct hpi_finger_contact_debounce finger_contact_debounce;
+static struct k_spinlock finger_contact_lock;
+
+static void reset_finger_contact(void)
+{
+    k_spinlock_key_t key = k_spin_lock(&finger_contact_lock);
+    atomic_set(&finger_contact_ok, 0);
+    finger_contact_debounce = (struct hpi_finger_contact_debounce){0};
+    k_spin_unlock(&finger_contact_lock, key);
+    k_sem_reset(&sem_finger_contact_on);
+    k_sem_reset(&sem_finger_contact_off);
+}
 
 void hpi_bpt_set_cal_vals(uint8_t cal_index, uint8_t cal_sys, uint8_t cal_dia)
 {
@@ -299,7 +310,11 @@ static void hpi_bpt_cal_rescan_vectors(void)
 
 static void sensor_ppg_finger_decode(uint8_t *buf, uint32_t buf_len, uint8_t m_ppg_op_mode)
 {
+    if (!buf || buf_len < sizeof(struct max32664d_encoded_data) ||
+        m_ppg_op_mode == PPG_FI_OP_MODE_IDLE) { return; }
     const struct max32664d_encoded_data *edata = (const struct max32664d_encoded_data *)buf;
+    /* No-data RTIO reads have no fresh algorithm status to interpret. */
+    if (edata->num_samples == 0 || edata->num_samples > 32) { return; }
     struct hpi_ppg_fi_data_t ppg_sensor_sample;
 
     uint8_t finger_status = edata->bpt_status ;
@@ -312,39 +327,15 @@ static void sensor_ppg_finger_decode(uint8_t *buf, uint32_t buf_len, uint8_t m_p
    
     bool current_contact = (finger_status == 4 || finger_status == 1 || finger_status == 2);
 
-   if (current_contact) {
-    contact_debounce_ts= 0;
-    
-    // Only set to true if it was false before
-    if (!atomic_get(&finger_contact_ok)) {
-        atomic_set(&finger_contact_ok, 1);
-        LOG_INF("Finger Contact status: %d", finger_status);
-        
-        // Signal that contact was just detected
-        if (!prev_finger_contact_ok) {
-            k_sem_give(&sem_finger_contact_on);
-            wait_start_ts = 0;  // Reset wait timer
-        }
-     }
-    } else {
-        if(contact_debounce_ts == 0)
-            contact_debounce_ts = k_uptime_get();
-        else if (k_uptime_get() - contact_debounce_ts >= 1000) {  // Require 1000ms(1 sec) of bad readings
-            // Only set to false if it was true before
-            if (atomic_get(&finger_contact_ok)) {
-                atomic_set(&finger_contact_ok, 0);
-                //LOG_INF("Finger contact lost (confirmed after %d ms)", k_uptime_get() - contact_debounce_ts);
-                
-                // Signal that contact was just lost
-                if (prev_finger_contact_ok) {
-                    k_sem_give(&sem_finger_contact_off);
-                }
-            }
-        }
+    k_spinlock_key_t key = k_spin_lock(&finger_contact_lock);
+    bool previous = atomic_get(&finger_contact_ok) != 0;
+    bool contact = hpi_finger_contact_update(&finger_contact_debounce,
+        previous, true, current_contact, k_uptime_get());
+    atomic_set(&finger_contact_ok, contact);
+    k_spin_unlock(&finger_contact_lock, key);
+    if (contact != previous) {
+        k_sem_give(contact ? &sem_finger_contact_on : &sem_finger_contact_off);
     }
-
-    // Update previous state
-    prev_finger_contact_ok = atomic_get(&finger_contact_ok);
 
     uint16_t _n_samples = edata->num_samples;
     // Cap to the FI PPG points per sample (driver may return up to 32)
@@ -685,9 +676,8 @@ static void st_ppg_fing_idle_entry(void *o)
     k_event_clear(&fi_evt, EVT_FI_SPO2_CANCEL);
     k_event_clear(&fi_evt, EVT_FI_BPT_EST_CANCEL);
     k_event_clear(&fi_evt, EVT_FI_BPT_CAL_CANCEL);
-    atomic_set(&finger_contact_ok, 0); 
+    reset_finger_contact();
     contact_lost_start_ts = 0;
-    contact_debounce_ts = 0;
 }
 
 // Add a new function to check if calibration data exists
@@ -1265,8 +1255,7 @@ static void st_ppg_fi_wait_for_contact_entry(void *o)
     struct s_ppg_fi_object *s = (struct s_ppg_fi_object *)o;
     LOG_DBG("PPG Finger SM Wait for Contact Entry");
     wait_start_ts = k_uptime_get();
-    atomic_set(&finger_contact_ok, 0);
-    contact_debounce_ts = 0;
+    reset_finger_contact();
     hpi_hw_fi_sensor_on();
     sens_decode_ppg_fi_op_mode = s->ppg_fi_op_mode;
     /* Loads BPT cal + starts estimation (also arms contact detection for SpO2).

@@ -10,6 +10,15 @@ commits, licenses and the exact changed files are recorded below and in
 features have been built and checked with automated tests; they have not yet
 been validated as a complete system on a physical watch and phone.
 
+## Finger contact fix
+
+Firmware **3.1.3-fingerfix** replaces 3.1.2-continuous and works with the same
+**3.0.11 APK**. It corrects the finger contact timestamp truncation and ignores
+empty sensor frames before interpreting contact. The full one-second loss delay
+is regression-tested, including recovery and long uptime. Status mapping is
+unchanged; actual contact/algorithm status still needs watch verification.
+See [details](fw/docs/FINGER_CONTACT_FIX.md) and the new build report.
+
 ## Android startup fix
 
 Use app **3.0.11+99** in place of 3.0.10. The preceding APK had no native
